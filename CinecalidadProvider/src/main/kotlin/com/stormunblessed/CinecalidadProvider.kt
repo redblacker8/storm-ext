@@ -26,7 +26,7 @@ class CinecalidadProvider : MainAPI() {
 
     override suspend fun getMainPage(
         page: Int,
-        request : MainPageRequest
+        request: MainPageRequest
     ): HomePageResponse {
         val url = request.data + page
 
@@ -121,6 +121,7 @@ class CinecalidadProvider : MainAPI() {
                     description,
                 )
             }
+
             TvType.Movie -> {
                 MovieLoadResponse(
                     title,
@@ -133,6 +134,7 @@ class CinecalidadProvider : MainAPI() {
                     description,
                 )
             }
+
             else -> null
         }
     }
@@ -149,14 +151,43 @@ class CinecalidadProvider : MainAPI() {
         val datatext = datam.text
 
         doc.select(".dooplay_player_option").apmap {
-            val url = it.attr("data-option").replace("youtube","")
-            if (url.startsWith("https://cinestart.net")) {
+            val url = it.attr("data-option").replace("youtube", "")
+            if (url.startsWith("https://cinestart.net") || url.startsWith("https://okru.link")) {
                 val extractor = Cinestart()
                 extractor.getSafeUrl(url, null, subtitleCallback, callback)
-            } else {
-                loadExtractor(url, mainUrl, subtitleCallback, callback)
-            }
-            if (url.startsWith("https://v4.cinecalidad.men")) {
+            } else if (url.startsWith("https://v4.cinecalidad.men/vipembed")) {
+                val res = app.get(
+                    url,
+                    headers = mapOf(
+                        "Host" to "v4.cinecalidad.men",
+                        "User-Agent" to USER_AGENT,
+                        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                        "Accept-Language" to "en-US,en;q=0.5",
+                        "DNT" to "1",
+                        "Connection" to "keep-alive",
+                        "Referer" to data,
+                        "Upgrade-Insecure-Requests" to "1",
+                        "Sec-Fetch-Dest" to "iframe",
+                        "Sec-Fetch-Mode" to "navigate",
+                        "Sec-Fetch-Site" to "same-origin",
+                        "Sec-Fetch-User" to "?1",
+                    ),
+                    allowRedirects = false
+                ).document
+                val extractedurl = res.selectFirst(".items-center iframe")!!.attr("src")
+                if (extractedurl.startsWith("https://filemoon.sx")) {
+// To fix
+//                    val regex = Regex("/e/(.*?)/")
+//                    val match = regex.find(extractedurl)
+//                    val idToReplace = match?.value
+//                    val secondLink =
+//                        "https://be6721.rcr72.waw04.cdn112.com/hls2/01/04608/replaceid_x/master.m3u8?t=0s9fTVeryRKDEVYo50OZuN1xOHT-6t3fsWpCq2wcVuQ&s=1694952078&e=43200&f=23043279&srv=01&asn=13999&sp=2500"
+//                    val newLink = secondLink.replace("replaceid", idToReplace ?: "")
+//                    loadExtractor(newLink, mainUrl, subtitleCallback, callback)
+                } else {
+                    loadExtractor(extractedurl, mainUrl, subtitleCallback, callback)
+                }
+            } else if (url.startsWith("https://v4.cinecalidad.mens")) {
                 val cineurlregex =
                     Regex("(https:\\/\\/v4\\.cinecalidad\\.men\\/play\\/\\?h=[a-zA-Z0-9]{0,8}[a-zA-Z0-9_-]+)")
                 cineurlregex.findAll(url).map {
@@ -180,11 +211,13 @@ class CinecalidadProvider : MainAPI() {
                         ),
                         allowRedirects = false
                     ).okhttpResponse.headers.values("location").apmap { extractedurl ->
-                        if (extractedurl.contains("cinestart")) {
-                            loadExtractor(extractedurl, mainUrl, subtitleCallback, callback)
+                                                if (extractedurl.contains("cinestart")) {
+loadExtractor(extractedurl, mainUrl, subtitleCallback, callback)
                         }
                     }
                 }
+            } else {
+                loadExtractor(url, mainUrl, subtitleCallback, callback)
             }
         }
         if (datatext.contains("en castellano")) app.get("$data?ref=es").document.select(".dooplay_player_option")
