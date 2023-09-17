@@ -6,7 +6,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.loadExtractor
 
 class CinecalidadProvider : MainAPI() {
-    override var mainUrl = "https://cinecalidad.lol"
+    override var mainUrl = "https://v4.cinecalidad.men"
     override var name = "Cinecalidad"
     override var lang = "es"
     override val hasMainPage = true
@@ -156,16 +156,16 @@ class CinecalidadProvider : MainAPI() {
             } else {
                 loadExtractor(url, mainUrl, subtitleCallback, callback)
             }
-            if (url.startsWith("https://cinecalidad.lol")) {
+            if (url.startsWith("https://v4.cinecalidad.men")) {
                 val cineurlregex =
-                    Regex("(https:\\/\\/cinecalidad\\.lol\\/play\\/\\?h=[a-zA-Z0-9]{0,8}[a-zA-Z0-9_-]+)")
+                    Regex("(https:\\/\\/v4\\.cinecalidad\\.men\\/play\\/\\?h=[a-zA-Z0-9]{0,8}[a-zA-Z0-9_-]+)")
                 cineurlregex.findAll(url).map {
                     it.value.replace("/play/", "/play/r.php")
                 }.toList().apmap {
                     app.get(
                         it,
                         headers = mapOf(
-                            "Host" to "cinecalidad.lol",
+                            "Host" to "v4.cinecalidad.men",
                             "User-Agent" to USER_AGENT,
                             "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
                             "Accept-Language" to "en-US,en;q=0.5",
@@ -197,16 +197,16 @@ class CinecalidadProvider : MainAPI() {
                     loadExtractor(url, mainUrl, subtitleCallback, callback)
                 }
 
-                if (url.startsWith("https://cinecalidad.lol")) {
+                if (url.startsWith("https://v4.cinecalidad.men")) {
                     val cineurlregex =
-                        Regex("(https:\\/\\/cinecalidad\\.lol\\/play\\/\\?h=[a-zA-Z0-9]{0,8}[a-zA-Z0-9_-]+)")
+                        Regex("(https:\\/\\/v4\\.cinecalidad\\.men\\/play\\/\\?h=[a-zA-Z0-9]{0,8}[a-zA-Z0-9_-]+)")
                     cineurlregex.findAll(url).map {
                         it.value.replace("/play/", "/play/r.php")
                     }.toList().apmap {
                         app.get(
                             it,
                             headers = mapOf(
-                                "Host" to "cinecalidad.lol",
+                                "Host" to "v4.cinecalidad.men",
                                 "User-Agent" to USER_AGENT,
                                 "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
                                 "Accept-Language" to "en-US,en;q=0.5",
