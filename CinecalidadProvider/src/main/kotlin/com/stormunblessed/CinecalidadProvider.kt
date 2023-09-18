@@ -4,6 +4,8 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.extractors.Cinestart
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.loadExtractor
+import com.lagradost.cloudstream3.utils.getQualityFromName
+import org.mozilla.javascript.Context
 
 class CinecalidadProvider : MainAPI() {
     override var mainUrl = "https://v4.cinecalidad.men"
@@ -81,6 +83,27 @@ class CinecalidadProvider : MainAPI() {
         }
     }
 
+
+    private fun streamClean(
+        name: String,
+        url: String,
+        referer: String,
+        quality: String?,
+        callback: (ExtractorLink) -> Unit,
+        m3u8: Boolean
+    ): Boolean {
+        callback(
+            ExtractorLink(
+                name,
+                name,
+                url,
+                referer,
+                getQualityFromName(quality),
+                m3u8
+            )
+        )
+        return true
+    }
 
     override suspend fun load(url: String): LoadResponse? {
         val soup = app.get(url, timeout = 120).document
@@ -176,18 +199,23 @@ class CinecalidadProvider : MainAPI() {
                 ).document
                 val extractedurl = res.selectFirst(".items-center iframe")!!.attr("src")
                 if (extractedurl.startsWith("https://filemoon.sx")) {
-// To fix
-//                    val regex = Regex("/e/(.*?)/")
-//                    val match = regex.find(extractedurl)
-//                    val idToReplace = match?.value
-//                    val secondLink =
-//                        "https://be6721.rcr72.waw04.cdn112.com/hls2/01/04608/replaceid_x/master.m3u8?t=0s9fTVeryRKDEVYo50OZuN1xOHT-6t3fsWpCq2wcVuQ&s=1694952078&e=43200&f=23043279&srv=01&asn=13999&sp=2500"
-//                    val newLink = secondLink.replace("replaceid", idToReplace ?: "")
-//                    loadExtractor(newLink, mainUrl, subtitleCallback, callback)
+                    filemoonsxLoader(extractedurl, data, callback)
+                } else if (extractedurl
+                        .startsWith("https://embedwish.com/e")
+                ) {
+                    embedWishLoader(extractedurl, data, callback)
                 } else {
                     loadExtractor(extractedurl, mainUrl, subtitleCallback, callback)
                 }
-            } else if (url.startsWith("https://v4.cinecalidad.mens")) {
+            } else if (url.startsWith("https://filemoon.sx")) {
+                filemoonsxLoader(url, data, callback)
+            } else if (url.startsWith("https://embedwish.com/e")) {
+                embedWishLoader(url, data, callback)
+            } else if (url.startsWith(
+                    "https://v4.c" +
+                            "inecalidad.men"
+                )
+            ) {
                 val cineurlregex =
                     Regex("(https:\\/\\/v4\\.cinecalidad\\.men\\/play\\/\\?h=[a-zA-Z0-9]{0,8}[a-zA-Z0-9_-]+)")
                 cineurlregex.findAll(url).map {
@@ -211,8 +239,8 @@ class CinecalidadProvider : MainAPI() {
                         ),
                         allowRedirects = false
                     ).okhttpResponse.headers.values("location").apmap { extractedurl ->
-                                                if (extractedurl.contains("cinestart")) {
-loadExtractor(extractedurl, mainUrl, subtitleCallback, callback)
+                        if (extractedurl.contains("cinestart")) {
+                            loadExtractor(extractedurl, mainUrl, subtitleCallback, callback)
                         }
                     }
                 }
@@ -288,4 +316,89 @@ loadExtractor(extractedurl, mainUrl, subtitleCallback, callback)
         }
         return true
     }
+
+    suspend fun embedWishLoader(url: String, data: String, callback: (ExtractorLink) -> Unit) {
+        val resText = app.get(
+            url,
+            headers = mapOf(
+                "User-Agent" to USER_AGENT,
+                "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+                "Accept-Language" to "en-GB,en;q=0.9,en-US;q=0.8,es-MX;q=0.7,es;q=0.6",
+                "Connection" to "keep-alive",
+                "Referer" to data,
+                "Sec-Fetch-Dest" to "iframe",
+                "Sec-Fetch-Mode" to "navigate",
+                "Sec-Fetch-Site" to "cross-site",
+                "Sec-Fetch-User" to "?1",
+                "Upgrade-Insecure-Requests" to "1",
+            ),
+            allowRedirects = false
+        ).text
+        val regex = """sources: \[\{file:"(.*?)"""".toRegex()
+        val match = regex.find(resText)
+        val extractedurl = match?.groupValues?.get(1) ?: ""
+        streamClean(
+            "embedwish.com",
+            extractedurl,
+            mainUrl,
+            null,
+            callback,
+            extractedurl.contains("m3u8")
+        )
+    }
+
+    suspend fun filemoonsxLoader(url: String, data: String, callback: (ExtractorLink) -> Unit) {
+        val doc = app.get(
+            url,
+            headers = mapOf(
+                "User-Agent" to USER_AGENT,
+                "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+                "Accept-Language" to "en-GB,en;q=0.9,en-US;q=0.8,es-MX;q=0.7,es;q=0.6",
+                "Connection" to "keep-alive",
+                "Referer" to data,
+                "Sec-Fetch-Dest" to "iframe",
+                "Sec-Fetch-Mode" to "navigate",
+                "Sec-Fetch-Site" to "cross-site",
+                "Sec-Fetch-User" to "?1",
+                "Upgrade-Insecure-Requests" to "1",
+            ),
+            allowRedirects = false
+        ).document
+        var cx = Context.enter()
+        cx.optimizationLevel = -1
+        var scope = cx.initStandardObjects();
+        cx.evaluateString(
+            scope, """
+                                var $
+                                $ = {
+                                    ajaxSetup: () => {
+                                        $ = () => ({on: () => null}) 
+                                    }
+                                }
+                                var init = {}
+                                var jwplayer = function(info){
+                                    return {
+                                        setup: (data) => init = data,
+                                        on: (name,callback) => null,
+                                        geturl: () => init.sources[0].file
+                                    }
+                                }
+                            """.trimIndent(), "script", 1, null
+        );
+        var script = doc.select("script").last()
+        var scriptContent = script?.html()
+        cx.evaluateString(scope, scriptContent, "script", 1, null)
+        var result = cx.evaluateString(scope, "videop.geturl()", "script2", 1, null)
+        var finalUrl = result.toString()
+        streamClean(
+            "filemoon.sx",
+            finalUrl,
+            mainUrl,
+            null,
+            callback,
+            finalUrl.contains("m3u8")
+        )
+//        cx.close()
+    }
 }
+
