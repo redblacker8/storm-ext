@@ -337,7 +337,7 @@ class CinecalidadProvider : MainAPI() {
         return true
     }
 
-    suspend fun netuCineCalidadExtractor(// Not working
+    suspend fun netuCineCalidadExtractor( // not working
         url: String,
         data: String,
         subtitleCallback: (SubtitleFile) -> Unit,
@@ -360,7 +360,12 @@ class CinecalidadProvider : MainAPI() {
                     "Upgrade-Insecure-Requests" to "1",
                 ),
                 allowRedirects = true,
-            ).
+            ).okhttpResponse.headers.values("location").apmap { extractedurl ->
+                streamTest(extractedurl, callback)
+//                if (extractedurl.contains("cinestart")) {
+//                    loadExtractor(extractedurl, mainUrl, subtitleCallback, callback)
+//                }
+            }
         } catch (e: Throwable) {
         }
     }
