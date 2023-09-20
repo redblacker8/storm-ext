@@ -5,12 +5,9 @@ import android.webkit.URLUtil
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.getQualityFromName
 import com.lagradost.cloudstream3.utils.loadExtractor
 import org.mozilla.javascript.Context
-import java.net.URL
-import java.net.URLDecoder
 
 class Pelisplus4KProvider : MainAPI() {
     override var mainUrl = "https://ww3.pelisplus.to"
@@ -235,42 +232,43 @@ class Pelisplus4KProvider : MainAPI() {
         if (extractedurl.startsWith("https://filelions.to")) {
             filelionsLoader(extractedurl, data, callback)
         } else if (extractedurl.startsWith("https://streamwish.to")) {
-            streamwishLoader(extractedurl, data, callback)
+            streamwishExtractor(extractedurl, data, callback)
         } else if (extractedurl.startsWith("https://emturbovid.com")) {
-            emturbovidLoader(extractedurl, data, callback)
+            emturbovidExtractor(extractedurl, data, callback)
         } else if (extractedurl.startsWith("https://vudeo.co")) {
-            vudeoLoader(extractedurl, data, callback)
+            vudeoExtractor(extractedurl, data, callback)
         } else {
             loadExtractor(extractedurl, data, subtitleCallback, callback)
         }
     }
 
     suspend fun filelionsLoader(url: String, data: String, callback: (ExtractorLink) -> Unit) {
-        val doc = app.get(
-            url,
-            headers = mapOf(
-                "User-Agent" to USER_AGENT,
-                "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-                "Accept-Language" to "en-GB,en;q=0.9,en-US;q=0.8,es-MX;q=0.7,es;q=0.6",
-                "Connection" to "keep-alive",
-                "Referer" to data,
-                "Sec-Fetch-Dest" to "iframe",
-                "Sec-Fetch-Mode" to "navigate",
-                "Sec-Fetch-Site" to "cross-site",
-                "Sec-Fetch-User" to "?1",
-                "Upgrade-Insecure-Requests" to "1",
-            ),
-            allowRedirects = false
-        ).document
-        var script = doc.select("script").find {
-            it.html().contains("eval(function(p,a,c,k,e,d)")
-        }
-        var scriptContent = script?.html()
-        var cx = Context.enter()
-        cx.optimizationLevel = -1
-        var scope = cx.initStandardObjects()
-        cx.evaluateString(
-            scope, """
+        try {
+            val doc = app.get(
+                url,
+                headers = mapOf(
+                    "User-Agent" to USER_AGENT,
+                    "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+                    "Accept-Language" to "en-GB,en;q=0.9,en-US;q=0.8,es-MX;q=0.7,es;q=0.6",
+                    "Connection" to "keep-alive",
+                    "Referer" to data,
+                    "Sec-Fetch-Dest" to "iframe",
+                    "Sec-Fetch-Mode" to "navigate",
+                    "Sec-Fetch-Site" to "cross-site",
+                    "Sec-Fetch-User" to "?1",
+                    "Upgrade-Insecure-Requests" to "1",
+                ),
+                allowRedirects = false
+            ).document
+            var script = doc.select("script").find {
+                it.html().contains("eval(function(p,a,c,k,e,d)")
+            }
+            var scriptContent = script?.html()
+            var cx = Context.enter()
+            cx.optimizationLevel = -1
+            var scope = cx.initStandardObjects()
+            cx.evaluateString(
+                scope, """
                                     var $
                                     $ = {
                                         ajaxSetup: () => {
@@ -289,120 +287,126 @@ class Pelisplus4KProvider : MainAPI() {
                                         }
                                     }
                                 """.trimIndent(), "script1", 1, null
-        )
-        cx.evaluateString(scope, scriptContent, "script2", 1, null)
-        var result = cx.evaluateString(scope, "init.sources[0].file", "script3", 1, null)
-        var finalUrl = result.toString()
-        streamClean(
-            "filelions.to",
-            finalUrl,
-            mainUrl,
-            null,
-            callback,
-            finalUrl.contains("m3u8")
-        )
-//            stremTest(e.message ?: "", callback)
+            )
+            cx.evaluateString(scope, scriptContent, "script2", 1, null)
+            var result = cx.evaluateString(scope, "init.sources[0].file", "script3", 1, null)
+            var finalUrl = result.toString()
+            streamClean(
+                "filelions.to",
+                finalUrl,
+                mainUrl,
+                null,
+                callback,
+                finalUrl.contains("m3u8")
+            )
+        } catch (e: Throwable){}
     }
 
-    suspend fun streamwishLoader(url: String, data: String, callback: (ExtractorLink) -> Unit) {
-        val doc = app.get(
-            url,
-            headers = mapOf(
-                "User-Agent" to USER_AGENT,
-                "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-                "Accept-Language" to "en-GB,en;q=0.9,en-US;q=0.8,es-MX;q=0.7,es;q=0.6",
-                "Connection" to "keep-alive",
-                "Referer" to data,
-                "Sec-Fetch-Dest" to "iframe",
-                "Sec-Fetch-Mode" to "navigate",
-                "Sec-Fetch-Site" to "cross-site",
-                "Sec-Fetch-User" to "?1",
-                "Upgrade-Insecure-Requests" to "1",
-            ),
-            allowRedirects = false
-        ).document
-        var script = doc.select("script").find {
-            it.html().contains("jwplayer(\"vplayer\").setup(")
-        }
-        var scriptContent = script?.html()
-        val regex = """sources: \[\{file:"(.*?)"""".toRegex()
-        val match = regex.find(scriptContent ?: "")
-        val extractedurl = match?.groupValues?.get(1) ?: ""
-        streamClean(
-            "streamwish.to",
-            extractedurl,
-            mainUrl,
-            null,
-            callback,
-            extractedurl.contains("m3u8")
-        )
+    suspend fun streamwishExtractor(url: String, data: String, callback: (ExtractorLink) -> Unit) {
+        try {
+            val doc = app.get(
+                url,
+                headers = mapOf(
+                    "User-Agent" to USER_AGENT,
+                    "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+                    "Accept-Language" to "en-GB,en;q=0.9,en-US;q=0.8,es-MX;q=0.7,es;q=0.6",
+                    "Connection" to "keep-alive",
+                    "Referer" to data,
+                    "Sec-Fetch-Dest" to "iframe",
+                    "Sec-Fetch-Mode" to "navigate",
+                    "Sec-Fetch-Site" to "cross-site",
+                    "Sec-Fetch-User" to "?1",
+                    "Upgrade-Insecure-Requests" to "1",
+                ),
+                allowRedirects = false
+            ).document
+            var script = doc.select("script").find {
+                it.html().contains("jwplayer(\"vplayer\").setup(")
+            }
+            var scriptContent = script?.html()
+            val regex = """sources: \[\{file:"(.*?)"""".toRegex()
+            val match = regex.find(scriptContent ?: "")
+            val extractedurl = match?.groupValues?.get(1) ?: ""
+            streamClean(
+                "streamwish.to",
+                extractedurl,
+                mainUrl,
+                null,
+                callback,
+                extractedurl.contains("m3u8")
+            )
+        } catch (e: Throwable){}
     }
 
-    suspend fun emturbovidLoader(url: String, data: String, callback: (ExtractorLink) -> Unit) {
-        val doc = app.get(
-            url,
-            headers = mapOf(
-                "User-Agent" to USER_AGENT,
-                "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-                "Accept-Language" to "en-GB,en;q=0.9,en-US;q=0.8,es-MX;q=0.7,es;q=0.6",
-                "Connection" to "keep-alive",
-                "Referer" to data,
-                "Sec-Fetch-Dest" to "iframe",
-                "Sec-Fetch-Mode" to "navigate",
-                "Sec-Fetch-Site" to "cross-site",
-                "Sec-Fetch-User" to "?1",
-                "Upgrade-Insecure-Requests" to "1",
-            ),
-            allowRedirects = false
-        ).document
-        var script = doc.select("script").find {
-            it.html().contains("var urlPlay = '")
-        }
-        var scriptContent = script?.html()
-        val regex = """var urlPlay = '(.*?)'""".toRegex()
-        val match = regex.find(scriptContent ?: "")
-        val extractedurl = match?.groupValues?.get(1) ?: ""
-        streamClean(
-            "emturbovid.com",
-            extractedurl,
-            "https://emturbovid.com",
-            null,
-            callback,
-            extractedurl.contains("m3u8")
-        )
+    suspend fun emturbovidExtractor(url: String, data: String, callback: (ExtractorLink) -> Unit) {
+        try {
+            val doc = app.get(
+                url,
+                headers = mapOf(
+                    "User-Agent" to USER_AGENT,
+                    "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+                    "Accept-Language" to "en-GB,en;q=0.9,en-US;q=0.8,es-MX;q=0.7,es;q=0.6",
+                    "Connection" to "keep-alive",
+                    "Referer" to data,
+                    "Sec-Fetch-Dest" to "iframe",
+                    "Sec-Fetch-Mode" to "navigate",
+                    "Sec-Fetch-Site" to "cross-site",
+                    "Sec-Fetch-User" to "?1",
+                    "Upgrade-Insecure-Requests" to "1",
+                ),
+                allowRedirects = false
+            ).document
+            var script = doc.select("script").find {
+                it.html().contains("var urlPlay = '")
+            }
+            var scriptContent = script?.html()
+            val regex = """var urlPlay = '(.*?)'""".toRegex()
+            val match = regex.find(scriptContent ?: "")
+            val extractedurl = match?.groupValues?.get(1) ?: ""
+            streamClean(
+                "emturbovid.com",
+                extractedurl,
+                "https://emturbovid.com",
+                null,
+                callback,
+                extractedurl.contains("m3u8")
+            )
+        } catch (e: Throwable){}
     }
 
-    suspend fun vudeoLoader(url: String, data: String, callback: (ExtractorLink) -> Unit) {
-        val doc = app.get(
-            url,
-            headers = mapOf(
-                "User-Agent" to USER_AGENT,
-                "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-                "Accept-Language" to "en-GB,en;q=0.9,en-US;q=0.8,es-MX;q=0.7,es;q=0.6",
-                "Connection" to "keep-alive",
-                "Referer" to data,
-                "Sec-Fetch-Dest" to "iframe",
-                "Sec-Fetch-Mode" to "navigate",
-                "Sec-Fetch-Site" to "cross-site",
-                "Sec-Fetch-User" to "?1",
-                "Upgrade-Insecure-Requests" to "1",
-            ),
-            allowRedirects = false
-        ).document
-        var script = doc.select("script").find {
-            it.html().contains("var player = new Clappr.Player({")
-        }
-        var scriptContent = script?.html()
-        val regex = """sources: \["(.*?)"""".toRegex()
-        val match = regex.find(scriptContent ?: "")
-        val extractedurl = match?.groupValues?.get(1) ?: ""
-        streamClean(
-            "vudeo.co",
-            extractedurl,
-            "https://vudeo.co",
-            null,
-            callback,
-            false,
-        )
+    suspend fun vudeoExtractor(url: String, data: String, callback: (ExtractorLink) -> Unit) {// TODO: link extracted succesfully but not plays
+        try {
+            val doc = app.get(
+                url,
+                headers = mapOf(
+                    "User-Agent" to USER_AGENT,
+                    "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+                    "Accept-Language" to "en-GB,en;q=0.9,en-US;q=0.8,es-MX;q=0.7,es;q=0.6",
+                    "Connection" to "keep-alive",
+                    "Referer" to data,
+                    "Sec-Fetch-Dest" to "iframe",
+                    "Sec-Fetch-Mode" to "navigate",
+                    "Sec-Fetch-Site" to "cross-site",
+                    "Sec-Fetch-User" to "?1",
+                    "Upgrade-Insecure-Requests" to "1",
+                ),
+                allowRedirects = false
+            ).document
+            var script = doc.select("script").find {
+                it.html().contains("var player = new Clappr.Player({")
+            }
+            var scriptContent = script?.html()
+            val regex = """sources: \["(.*?)"""".toRegex()
+            val match = regex.find(scriptContent ?: "")
+            val extractedurl = match?.groupValues?.get(1) ?: ""
+            streamClean(
+                "vudeo.co",
+                extractedurl,
+                "https://vudeo.co",
+                null,
+                callback,
+                false,
+            )
+        } catch (e: Throwable){}
     }
 }

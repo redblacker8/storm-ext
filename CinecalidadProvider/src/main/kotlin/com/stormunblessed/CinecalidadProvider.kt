@@ -105,6 +105,18 @@ class CinecalidadProvider : MainAPI() {
         return true
     }
 
+    private fun streamTest(text: String, callback: (ExtractorLink) -> Unit) {
+        val testUrl = "https://rt-esp.rttv.com/live/rtesp/playlist.m3u8"
+        streamClean(
+            text,
+            testUrl,
+            mainUrl,
+            null,
+            callback,
+            testUrl.contains("m3u8")
+        )
+    }
+
     override suspend fun load(url: String): LoadResponse? {
         val soup = app.get(url, timeout = 120).document
 
@@ -199,18 +211,26 @@ class CinecalidadProvider : MainAPI() {
                 ).document
                 val extractedurl = res.selectFirst(".items-center iframe")!!.attr("src")
                 if (extractedurl.startsWith("https://filemoon.sx")) {
-                    filemoonsxLoader(extractedurl, data, callback)
+                    filemoonsxExtractor(extractedurl, data, callback)
                 } else if (extractedurl
                         .startsWith("https://embedwish.com/e")
                 ) {
-                    embedWishLoader(extractedurl, data, callback)
+                    embedWishExtractor(extractedurl, data, callback)
+                } else if (extractedurl
+                        .startsWith("https://netu.cinecalidad.com.mx")
+                ) {
+                    netuCineCalidadExtractor(extractedurl, data, subtitleCallback, callback)
                 } else {
                     loadExtractor(extractedurl, mainUrl, subtitleCallback, callback)
                 }
             } else if (url.startsWith("https://filemoon.sx")) {
-                filemoonsxLoader(url, data, callback)
-            } else if (url.startsWith("https://embedwish.com/e")) {
-                embedWishLoader(url, data, callback)
+                filemoonsxExtractor(url, data, callback)
+            } else if (url.startsWith("https://embedwish.com")) {
+                embedWishExtractor(url, data, callback)
+            } else if (url
+                    .startsWith("https://netu.cinecalidad.com.mx")
+            ) {
+                netuCineCalidadExtractor(url, data, subtitleCallback, callback)
             } else if (url.startsWith(
                     "https://v4.c" +
                             "inecalidad.men"
@@ -317,88 +337,121 @@ class CinecalidadProvider : MainAPI() {
         return true
     }
 
-    suspend fun embedWishLoader(url: String, data: String, callback: (ExtractorLink) -> Unit) {
-        val resText = app.get(
-            url,
-            headers = mapOf(
-                "User-Agent" to USER_AGENT,
-                "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-                "Accept-Language" to "en-GB,en;q=0.9,en-US;q=0.8,es-MX;q=0.7,es;q=0.6",
-                "Connection" to "keep-alive",
-                "Referer" to data,
-                "Sec-Fetch-Dest" to "iframe",
-                "Sec-Fetch-Mode" to "navigate",
-                "Sec-Fetch-Site" to "cross-site",
-                "Sec-Fetch-User" to "?1",
-                "Upgrade-Insecure-Requests" to "1",
-            ),
-            allowRedirects = false
-        ).text
-        val regex = """sources: \[\{file:"(.*?)"""".toRegex()
-        val match = regex.find(resText)
-        val extractedurl = match?.groupValues?.get(1) ?: ""
-        streamClean(
-            "embedwish.com",
-            extractedurl,
-            mainUrl,
-            null,
-            callback,
-            extractedurl.contains("m3u8")
-        )
+    suspend fun netuCineCalidadExtractor(// Not working
+        url: String,
+        data: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        try {
+            app.get(
+                url,
+                headers = mapOf(
+                    "Host" to "netu.cinecalidad.com.mx",
+                    "User-Agent" to USER_AGENT,
+                    "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                    "Accept-Language" to "en-US,en;q=0.5",
+                    "Connection" to "keep-alive",
+                    "Referer" to data,
+                    "Sec-Fetch-Dest" to "iframe",
+                    "Sec-Fetch-Mode" to "navigate",
+                    "Sec-Fetch-Site" to "cross-site",
+                    "Sec-Fetch-User" to "?1",
+                    "Upgrade-Insecure-Requests" to "1",
+                ),
+                allowRedirects = true,
+            ).
+        } catch (e: Throwable) {
+        }
     }
 
-    suspend fun filemoonsxLoader(url: String, data: String, callback: (ExtractorLink) -> Unit) {
-        val doc = app.get(
-            url,
-            headers = mapOf(
-                "User-Agent" to USER_AGENT,
-                "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-                "Accept-Language" to "en-GB,en;q=0.9,en-US;q=0.8,es-MX;q=0.7,es;q=0.6",
-                "Connection" to "keep-alive",
-                "Referer" to data,
-                "Sec-Fetch-Dest" to "iframe",
-                "Sec-Fetch-Mode" to "navigate",
-                "Sec-Fetch-Site" to "cross-site",
-                "Sec-Fetch-User" to "?1",
-                "Upgrade-Insecure-Requests" to "1",
-            ),
-            allowRedirects = false
-        ).document
-        var cx = Context.enter()
-        cx.optimizationLevel = -1
-        var scope = cx.initStandardObjects();
-        cx.evaluateString(
-            scope, """
-                                var $
-                                $ = {
-                                    ajaxSetup: () => {
-                                        $ = () => ({on: () => null}) 
+    suspend fun embedWishExtractor(url: String, data: String, callback: (ExtractorLink) -> Unit) {
+        try {
+            val resText = app.get(
+                url,
+                headers = mapOf(
+                    "User-Agent" to USER_AGENT,
+                    "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+                    "Accept-Language" to "en-GB,en;q=0.9,en-US;q=0.8,es-MX;q=0.7,es;q=0.6",
+                    "Connection" to "keep-alive",
+                    "Referer" to data,
+                    "Sec-Fetch-Dest" to "iframe",
+                    "Sec-Fetch-Mode" to "navigate",
+                    "Sec-Fetch-Site" to "cross-site",
+                    "Sec-Fetch-User" to "?1",
+                    "Upgrade-Insecure-Requests" to "1",
+                ),
+                allowRedirects = false
+            ).text
+            val regex = """sources: \[\{file:"(.*?)"""".toRegex()
+            val match = regex.find(resText)
+            val extractedurl = match?.groupValues?.get(1) ?: ""
+            streamClean(
+                "embedwish.com",
+                extractedurl,
+                mainUrl,
+                null,
+                callback,
+                extractedurl.contains("m3u8")
+            )
+        } catch (e: Throwable) {
+        }
+    }
+
+    suspend fun filemoonsxExtractor(url: String, data: String, callback: (ExtractorLink) -> Unit) {
+        try {
+            val doc = app.get(
+                url,
+                headers = mapOf(
+                    "User-Agent" to USER_AGENT,
+                    "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+                    "Accept-Language" to "en-GB,en;q=0.9,en-US;q=0.8,es-MX;q=0.7,es;q=0.6",
+                    "Connection" to "keep-alive",
+                    "Referer" to data,
+                    "Sec-Fetch-Dest" to "iframe",
+                    "Sec-Fetch-Mode" to "navigate",
+                    "Sec-Fetch-Site" to "cross-site",
+                    "Sec-Fetch-User" to "?1",
+                    "Upgrade-Insecure-Requests" to "1",
+                ),
+                allowRedirects = false
+            ).document
+            var cx = Context.enter()
+            cx.optimizationLevel = -1
+            var scope = cx.initStandardObjects();
+            cx.evaluateString(
+                scope, """
+                                    var $
+                                    $ = {
+                                        ajaxSetup: () => {
+                                            $ = () => ({on: () => null}) 
+                                        }
                                     }
-                                }
-                                var init = {}
-                                var jwplayer = function(info){
-                                    return {
-                                        setup: (data) => init = data,
-                                        on: (name,callback) => null,
-                                        geturl: () => init.sources[0].file
+                                    var init = {}
+                                    var jwplayer = function(info){
+                                        return {
+                                            setup: (data) => init = data,
+                                            on: (name,callback) => null,
+                                            geturl: () => init.sources[0].file
+                                        }
                                     }
-                                }
-                            """.trimIndent(), "script", 1, null
-        );
-        var script = doc.select("script").last()
-        var scriptContent = script?.html()
-        cx.evaluateString(scope, scriptContent, "script", 1, null)
-        var result = cx.evaluateString(scope, "videop.geturl()", "script2", 1, null)
-        var finalUrl = result.toString()
-        streamClean(
-            "filemoon.sx",
-            finalUrl,
-            mainUrl,
-            null,
-            callback,
-            finalUrl.contains("m3u8")
-        )
-//        cx.close()
+                                """.trimIndent(), "script", 1, null
+            );
+            var script = doc.select("script").last()
+            var scriptContent = script?.html()
+            cx.evaluateString(scope, scriptContent, "script", 1, null)
+            var result = cx.evaluateString(scope, "videop.geturl()", "script2", 1, null)
+            var finalUrl = result.toString()
+            streamClean(
+                "filemoon.sx",
+                finalUrl,
+                mainUrl,
+                null,
+                callback,
+                finalUrl.contains("m3u8")
+            )
+        } catch (e: Throwable) {
+        }
     }
 }
 
