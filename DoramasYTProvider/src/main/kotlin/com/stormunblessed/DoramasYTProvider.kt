@@ -13,7 +13,7 @@ class DoramasYTProvider : MainAPI() {
         fun getType(t: String): TvType {
             return if (t.contains("OVA") || t.contains("Especial")) TvType.OVA
             else if (t.contains("Pelicula")) TvType.Movie
-            else TvType.TvSeries
+            else TvType.AsianDrama
         }
 
         fun getDubStatus(title: String): DubStatus {
