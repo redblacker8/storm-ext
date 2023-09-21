@@ -2,6 +2,7 @@ package com.lagradost.cloudstream3.animeproviders
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.JsUnpacker
 import com.lagradost.cloudstream3.utils.getQualityFromName
 import com.lagradost.cloudstream3.utils.loadExtractor
 import org.mozilla.javascript.Context
@@ -345,40 +346,25 @@ class DoramasYTProvider : MainAPI() {
                 ),
                 allowRedirects = false
             ).document
-            var cx = Context.enter()
-            cx.optimizationLevel = -1
-            var scope = cx.initStandardObjects();
-            cx.evaluateString(
-                scope, """
-                                    var $
-                                    $ = {
-                                        ajaxSetup: () => {
-                                            $ = () => ({on: () => null}) 
-                                        }
-                                    }
-                                    var init = {}
-                                    var jwplayer = function(info){
-                                        return {
-                                            setup: (data) => init = data,
-                                            on: (name,callback) => null,
-                                            geturl: () => init.sources[0].file
-                                        }
-                                    }
-                                """.trimIndent(), "script", 1, null
-            );
-            var script = doc.select("script").last()
-            var scriptContent = script?.html()
-            cx.evaluateString(scope, scriptContent, "script", 1, null)
-            var result = cx.evaluateString(scope, "videop.geturl()", "script2", 1, null)
-            var finalUrl = result.toString()
-            streamClean(
-                "filemoon.sx",
-                finalUrl,
-                mainUrl,
-                null,
-                callback,
-                finalUrl.contains("m3u8")
-            )
+            doc.select("script").apmap {
+                val script = JsUnpacker(it.html())
+                if (script.detect()) {
+                    val regex = """sources:\[\{file:"(.*?)"""".toRegex()
+                    val match = regex.find(script.unpack() ?: "")
+                    val extractedurl = match?.groupValues?.get(1) ?: ""
+                    if(!extractedurl.isNullOrBlank()){
+                        streamClean(
+                            "filemoon.sx",
+                            extractedurl,
+                            "https://filemoon.sx/",
+                            null,
+                            callback,
+                            extractedurl.contains("m3u8")
+                        )
+                        return@apmap
+                    }
+                }
+            }
         } catch (e: Throwable) {
         }
     }

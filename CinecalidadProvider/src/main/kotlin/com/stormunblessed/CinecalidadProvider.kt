@@ -3,12 +3,14 @@ package com.lagradost.cloudstream3.movieproviders
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.extractors.Cinestart
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.JsUnpacker
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.getQualityFromName
 import org.mozilla.javascript.Context
+import java.net.URI
 
 class CinecalidadProvider : MainAPI() {
-    override var mainUrl = "https://v4.cinecalidad.men"
+    override var mainUrl = "https://cinecalidad.cat"
     override var name = "Cinecalidad"
     override var lang = "es"
     override val hasMainPage = true
@@ -185,66 +187,14 @@ class CinecalidadProvider : MainAPI() {
         val doc = datam.document
         val datatext = datam.text
 
-        doc.select(".dooplay_player_option").apmap {
-            val url = it.attr("data-option").replace("youtube", "")
-            if (url.startsWith("https://cinestart.net") || url.startsWith("https://okru.link")) {
-                val extractor = Cinestart()
-                extractor.getSafeUrl(url, null, subtitleCallback, callback)
-            } else if (url.startsWith("https://v4.cinecalidad.men/vipembed")) {
-                val res = app.get(
-                    url,
-                    headers = mapOf(
-                        "Host" to "v4.cinecalidad.men",
-                        "User-Agent" to USER_AGENT,
-                        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-                        "Accept-Language" to "en-US,en;q=0.5",
-                        "DNT" to "1",
-                        "Connection" to "keep-alive",
-                        "Referer" to data,
-                        "Upgrade-Insecure-Requests" to "1",
-                        "Sec-Fetch-Dest" to "iframe",
-                        "Sec-Fetch-Mode" to "navigate",
-                        "Sec-Fetch-Site" to "same-origin",
-                        "Sec-Fetch-User" to "?1",
-                    ),
-                    allowRedirects = false
-                ).document
-                val extractedurl = res.selectFirst(".items-center iframe")!!.attr("src")
-                if (extractedurl.startsWith("https://filemoon.sx")) {
-                    filemoonsxExtractor(extractedurl, data, callback)
-                } else if (extractedurl
-                        .startsWith("https://embedwish.com/e")
-                ) {
-                    embedWishExtractor(extractedurl, data, callback)
-                } else if (extractedurl
-                        .startsWith("https://netu.cinecalidad.com.mx")
-                ) {
-                    netuCineCalidadExtractor(extractedurl, data, subtitleCallback, callback)
-                } else {
-                    loadExtractor(extractedurl, mainUrl, subtitleCallback, callback)
-                }
-            } else if (url.startsWith("https://filemoon.sx")) {
-                filemoonsxExtractor(url, data, callback)
-            } else if (url.startsWith("https://embedwish.com")) {
-                embedWishExtractor(url, data, callback)
-            } else if (url
-                    .startsWith("https://netu.cinecalidad.com.mx")
-            ) {
-                netuCineCalidadExtractor(url, data, subtitleCallback, callback)
-            } else if (url.startsWith(
-                    "https://v4.c" +
-                            "inecalidad.men"
-                )
-            ) {
-                val cineurlregex =
-                    Regex("(https:\\/\\/v4\\.cinecalidad\\.men\\/play\\/\\?h=[a-zA-Z0-9]{0,8}[a-zA-Z0-9_-]+)")
-                cineurlregex.findAll(url).map {
-                    it.value.replace("/play/", "/play/r.php")
-                }.toList().apmap {
-                    app.get(
-                        it,
+        doc.select("div #playeroptions li").apmap {
+            try {
+                val url = it.attr("data-option").replace("youtube", "")
+                if (url.contains("""https:\/\/v\d+.cinecalidad.men\/vipembed""".toRegex())) {
+                    val res = app.get(
+                        url,
                         headers = mapOf(
-                            "Host" to "v4.cinecalidad.men",
+                            "Host" to (URI(data).host ?: ""),
                             "User-Agent" to USER_AGENT,
                             "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
                             "Accept-Language" to "en-US,en;q=0.5",
@@ -258,14 +208,66 @@ class CinecalidadProvider : MainAPI() {
                             "Sec-Fetch-User" to "?1",
                         ),
                         allowRedirects = false
-                    ).okhttpResponse.headers.values("location").apmap { extractedurl ->
-                        if (extractedurl.contains("cinestart")) {
-                            loadExtractor(extractedurl, mainUrl, subtitleCallback, callback)
+                    ).document
+                    val extractedurl = res.selectFirst("iframe")!!.attr("src")
+                    if (extractedurl.startsWith("https://filemoon.sx")) {
+                        filemoonsxExtractor(extractedurl, data, callback)
+                    } else if (extractedurl
+                            .startsWith("https://embedwish.com/e")
+                    ) {
+                        embedWishExtractor(extractedurl, data, callback)
+                    } else if (extractedurl
+                            .startsWith("https://netu.cinecalidad.com.mx")
+                    ) {
+                        netuCineCalidadExtractor(extractedurl, data, subtitleCallback, callback)
+                    } else {
+                        loadExtractor(extractedurl, mainUrl, subtitleCallback, callback)
+                    }
+                } else if (url.startsWith("https://cinestart.net")) {
+                    val extractor = Cinestart()
+                    extractor.getSafeUrl(url, null, subtitleCallback, callback)
+                } else if (url.startsWith("https://filemoon.sx")) {
+                    filemoonsxExtractor(url, data, callback)
+                } else if (url.startsWith("https://embedwish.com")) {
+                    embedWishExtractor(url, data, callback)
+                } else if (url
+                        .startsWith("https://netu.cinecalidad.com.mx")
+                ) {
+                    netuCineCalidadExtractor(url, data, subtitleCallback, callback)
+                } else if (url.startsWith("https://v4.cinecalidad.men")) {
+                    val cineurlregex =
+                        Regex("(https:\\/\\/v4\\.cinecalidad\\.men\\/play\\/\\?h=[a-zA-Z0-9]{0,8}[a-zA-Z0-9_-]+)")
+                    cineurlregex.findAll(url).map {
+                        it.value.replace("/play/", "/play/r.php")
+                    }.toList().apmap {
+                        app.get(
+                            it,
+                            headers = mapOf(
+                                "Host" to "v4.cinecalidad.men",
+                                "User-Agent" to USER_AGENT,
+                                "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                                "Accept-Language" to "en-US,en;q=0.5",
+                                "DNT" to "1",
+                                "Connection" to "keep-alive",
+                                "Referer" to data,
+                                "Upgrade-Insecure-Requests" to "1",
+                                "Sec-Fetch-Dest" to "iframe",
+                                "Sec-Fetch-Mode" to "navigate",
+                                "Sec-Fetch-Site" to "same-origin",
+                                "Sec-Fetch-User" to "?1",
+                            ),
+                            allowRedirects = false
+                        ).okhttpResponse.headers.values("location").apmap { extractedurl ->
+                            if (extractedurl.contains("cinestart")) {
+                                loadExtractor(extractedurl, mainUrl, subtitleCallback, callback)
+                            }
                         }
                     }
+                } else {
+                    loadExtractor(url, mainUrl, subtitleCallback, callback)
                 }
-            } else {
-                loadExtractor(url, mainUrl, subtitleCallback, callback)
+            } catch (e: Throwable) {
+                streamTest(e.message ?: "error", callback)
             }
         }
         if (datatext.contains("en castellano")) app.get("$data?ref=es").document.select(".dooplay_player_option")
@@ -359,7 +361,7 @@ class CinecalidadProvider : MainAPI() {
                     "Sec-Fetch-User" to "?1",
                     "Upgrade-Insecure-Requests" to "1",
                 ),
-                allowRedirects = true,
+                allowRedirects = false,
             ).okhttpResponse.headers.values("location").apmap { extractedurl ->
                 streamTest(extractedurl, callback)
 //                if (extractedurl.contains("cinestart")) {
@@ -421,40 +423,25 @@ class CinecalidadProvider : MainAPI() {
                 ),
                 allowRedirects = false
             ).document
-            var cx = Context.enter()
-            cx.optimizationLevel = -1
-            var scope = cx.initStandardObjects();
-            cx.evaluateString(
-                scope, """
-                                    var $
-                                    $ = {
-                                        ajaxSetup: () => {
-                                            $ = () => ({on: () => null}) 
-                                        }
-                                    }
-                                    var init = {}
-                                    var jwplayer = function(info){
-                                        return {
-                                            setup: (data) => init = data,
-                                            on: (name,callback) => null,
-                                            geturl: () => init.sources[0].file
-                                        }
-                                    }
-                                """.trimIndent(), "script", 1, null
-            );
-            var script = doc.select("script").last()
-            var scriptContent = script?.html()
-            cx.evaluateString(scope, scriptContent, "script", 1, null)
-            var result = cx.evaluateString(scope, "videop.geturl()", "script2", 1, null)
-            var finalUrl = result.toString()
-            streamClean(
-                "filemoon.sx",
-                finalUrl,
-                mainUrl,
-                null,
-                callback,
-                finalUrl.contains("m3u8")
-            )
+            doc.select("script").apmap {
+                val script = JsUnpacker(it.html())
+                if (script.detect()) {
+                    val regex = """sources:\[\{file:"(.*?)"""".toRegex()
+                    val match = regex.find(script.unpack() ?: "")
+                    val extractedurl = match?.groupValues?.get(1) ?: ""
+                    if (!extractedurl.isNullOrBlank()) {
+                        streamClean(
+                            "filemoon.sx",
+                            extractedurl,
+                            "https://filemoon.sx/",
+                            null,
+                            callback,
+                            extractedurl.contains("m3u8")
+                        )
+                        return@apmap
+                    }
+                }
+            }
         } catch (e: Throwable) {
         }
     }
