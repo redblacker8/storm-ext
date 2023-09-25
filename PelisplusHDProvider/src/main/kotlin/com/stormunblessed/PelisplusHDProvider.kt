@@ -1,12 +1,19 @@
 package com.lagradost.cloudstream3.movieproviders
 
+import android.net.Uri
+import android.util.Base64
+import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.JsUnpacker
 import com.lagradost.cloudstream3.utils.getQualityFromName
 import com.lagradost.cloudstream3.utils.loadExtractor
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.jsoup.nodes.Element
-import org.mozilla.javascript.Context
+import javax.crypto.Cipher
+import javax.crypto.spec.SecretKeySpec
 
 class PelisplusHDProvider : MainAPI() {
     override var mainUrl = "https://pelisplushd.dev"
@@ -252,6 +259,8 @@ class PelisplusHDProvider : MainAPI() {
                             streamwishExtractor(link, data, callback)
                         } else if (link.startsWith("https://doodstream.com")) {
                             doodstreamExtractor(link, data, callback)
+                        } else if (link.startsWith("https://plusvip.net")) {
+                            plusvipnetExtractor(link, data, callback)
                         } else {
                             loadExtractor(link, data, subtitleCallback, callback)
                         }
@@ -285,7 +294,7 @@ class PelisplusHDProvider : MainAPI() {
                     val regex = """sources:\[\{file:"(.*?)"""".toRegex()
                     val match = regex.find(script.unpack() ?: "")
                     val extractedurl = match?.groupValues?.get(1) ?: ""
-                    if(!extractedurl.isNullOrBlank()){
+                    if (!extractedurl.isNullOrBlank()) {
                         streamClean(
                             "filemoon.sx",
                             extractedurl,
@@ -382,6 +391,7 @@ class PelisplusHDProvider : MainAPI() {
                     "Upgrade-Insecure-Requests" to "1",
                 )
             ).document.text()
+
             fun makePlay(): String {
                 val chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
                 val charsLength = chars.length
@@ -393,7 +403,8 @@ class PelisplusHDProvider : MainAPI() {
                 val now = System.currentTimeMillis() + 5000
                 return "$result?token=sfqpjbi1vlvjr16o02wb7wa8&expiry=$now"
             }
-            val extractedUrl = baseurl+makePlay()
+
+            val extractedUrl = baseurl + makePlay()
             streamClean(
                 "doodstream.com",
                 extractedUrl,
@@ -402,6 +413,77 @@ class PelisplusHDProvider : MainAPI() {
                 callback,
                 false
             )
+        } catch (e: Throwable) {
+        }
+    }
+
+    suspend fun plusvipnetExtractor(url: String, data: String, callback: (ExtractorLink) -> Unit) {
+        fun getParameterByKey(url: String, key: String): String? {
+            val uri = Uri.parse(url)
+            val queryParameterNames = uri.getQueryParameterNames()
+
+            for (queryParameterName in queryParameterNames) {
+                if (queryParameterName == key) {
+                    return uri.getQueryParameter(queryParameterName)
+                }
+            }
+
+            return null
+        }
+
+        data class PlusvipNetSources(
+            @JsonProperty("link") var link: String? = null,
+        )
+
+        fun decryptBase64AES(input: String, key: String): String {
+            val inputBytes = Base64.decode(input, Base64.DEFAULT)
+            val secretKey = SecretKeySpec(key.toByteArray(), "AES")
+            val cipher = Cipher.getInstance("AES/ECB/PKCS5Padding")
+            cipher.init(Cipher.DECRYPT_MODE, secretKey)
+            val outputBytes = cipher.doFinal(inputBytes)
+            val output = Base64.encodeToString(outputBytes, Base64.DEFAULT)
+            return output
+        }
+        try {
+            val endpointHash =
+                app.get(url).document.select("script[type=json]").first()?.html()?.replace("\"", "")
+            if (endpointHash.isNullOrBlank()) {
+                return
+            }
+            val endpoint =
+                base64Decode(decryptBase64AES(endpointHash, "d41d8cd98f00b204e9800998ecf8427e"))
+            val token = getParameterByKey(url, "data")
+            val fetchurl = "https://plusvip.net$endpoint"
+            val res = parseJson<PlusvipNetSources>(
+                app.post(
+                    fetchurl,
+                    headers = mapOf(
+                        "Host" to "plusvip.net",
+                        "Origin" to "https://plusvip.net",
+                        "Referer" to url,
+                        "User-Agent" to USER_AGENT,
+                        "Accept" to "*/*",
+                        "Accept-Language" to "en-US,en;q=0.5",
+                        "Connection" to "keep-alive",
+                        "Sec-Fetch-Dest" to "empty",
+                        "Sec-Fetch-Mode" to "cors",
+                        "Sec-Fetch-Site" to "same-origin",
+                    ),
+                    requestBody = "link=$token".toRequestBody(
+                        contentType = "application/x-www-form-urlencoded; charset=UTF-8".toMediaType()
+                    )
+                ).text
+            )
+            if (!res.link.isNullOrBlank()) {
+                streamClean(
+                    "plusvip.net",
+                    res.link ?: "",
+                    "",
+                    "",
+                    callback,
+                    false,
+                )
+            }
         } catch (e: Throwable) {
         }
     }

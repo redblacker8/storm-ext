@@ -1,12 +1,19 @@
 package com.lagradost.cloudstream3.movieproviders
 
+import android.net.Uri
+import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.extractors.Cinestart
+import com.lagradost.cloudstream3.extractors.Okrulink
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.AppUtils.parseJson
+import com.lagradost.cloudstream3.utils.AppUtils.toJson
 import com.lagradost.cloudstream3.utils.JsUnpacker
+import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.getQualityFromName
-import org.mozilla.javascript.Context
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 import java.net.URI
 
 class CinecalidadProvider : MainAPI() {
@@ -210,7 +217,9 @@ class CinecalidadProvider : MainAPI() {
                         allowRedirects = false
                     ).document
                     val extractedurl = res.selectFirst("iframe")!!.attr("src")
-                    if (extractedurl.startsWith("https://filemoon.sx")) {
+                    if (extractedurl.startsWith("https://okru.link")) {
+                        okruLinkExtractor(extractedurl, data, callback)
+                    } else if (extractedurl.startsWith("https://filemoon.sx")) {
                         filemoonsxExtractor(extractedurl, data, callback)
                     } else if (extractedurl
                             .startsWith("https://embedwish.com/e")
@@ -223,6 +232,8 @@ class CinecalidadProvider : MainAPI() {
                     } else {
                         loadExtractor(extractedurl, mainUrl, subtitleCallback, callback)
                     }
+                } else if (url.startsWith("https://okru.link")) {
+                    okruLinkExtractor(url, data, callback)
                 } else if (url.startsWith("https://cinestart.net")) {
                     val extractor = Cinestart()
                     extractor.getSafeUrl(url, null, subtitleCallback, callback)
@@ -267,7 +278,6 @@ class CinecalidadProvider : MainAPI() {
                     loadExtractor(url, mainUrl, subtitleCallback, callback)
                 }
             } catch (e: Throwable) {
-                streamTest(e.message ?: "error", callback)
             }
         }
         if (datatext.contains("en castellano")) app.get("$data?ref=es").document.select(".dooplay_player_option")
@@ -441,6 +451,59 @@ class CinecalidadProvider : MainAPI() {
                         return@apmap
                     }
                 }
+            }
+        } catch (e: Throwable) {
+        }
+    }
+
+    suspend fun okruLinkExtractor(url: String, data: String, callback: (ExtractorLink) -> Unit) {
+        fun getParameterByKey(url: String, key: String): String? {
+            val uri = Uri.parse(url)
+            val queryParameterNames = uri.getQueryParameterNames()
+
+            for (queryParameterName in queryParameterNames) {
+                if (queryParameterName == key) {
+                    return uri.getQueryParameter(queryParameterName)
+                }
+            }
+
+            return null
+        }
+
+        data class ApizzOkruLinkResponse(
+            @JsonProperty("url") var url: String? = null,
+            @JsonProperty("status") var status: String? = null,
+        )
+        try {
+            val token = getParameterByKey(url, "t")
+            val resultJson = parseJson<ApizzOkruLinkResponse>(
+                app.post(
+                    "https://apizz.okru.link/decoding",
+                    headers = mapOf(
+                        "Host" to "apizz.okru.link",
+                        "Origin" to "https://okru.link",
+                        "User-Agent" to USER_AGENT,
+                        "Accept" to "*/*",
+                        "Accept-Language" to "en-US,en;q=0.5",
+                        "Connection" to "keep-alive",
+                        "Sec-Fetch-Dest" to "empty",
+                        "Sec-Fetch-Mode" to "cors",
+                        "Sec-Fetch-Site" to "same-site",
+                    ),
+                    requestBody = "video=$token".toRequestBody(
+                        contentType = "application/x-www-form-urlencoded; charset=UTF-8".toMediaType()
+                    )
+                ).text
+            )
+            if (!resultJson.url.isNullOrBlank()) {
+                streamClean(
+                    "okru.link",
+                    resultJson.url ?: "",
+                    "",
+                    "",
+                    callback,
+                    false,
+                )
             }
         } catch (e: Throwable) {
         }

@@ -4,9 +4,10 @@ import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.getQualityFromName
 import com.lagradost.cloudstream3.utils.loadExtractor
 
-class PlayhubProvider:MainAPI() {
+class PlayhubProvider : MainAPI() {
     override var mainUrl = "https://playhublite.com"
     override var name = "Playhub"
     override var lang = "es"
@@ -18,7 +19,8 @@ class PlayhubProvider:MainAPI() {
         TvType.Movie,
         TvType.TvSeries,
     )
-    companion object  {
+
+    companion object {
         private const val playhubAPI = "https://api.playhublite.com/api/v2/"
         private val playhubHeaders = mapOf(
             "Host" to "api.playhublite.com",
@@ -43,28 +45,29 @@ class PlayhubProvider:MainAPI() {
         return if (link.startsWith("/")) "https://image.tmdb.org/t/p/w1280/$link" else link
     }
 
-    data class PlayHubMain (
-        @JsonProperty("home"        ) var home        : ArrayList<PlayHubHome>        = arrayListOf(),
+    data class PlayHubMain(
+        @JsonProperty("home") var home: ArrayList<PlayHubHome> = arrayListOf(),
         //@JsonProperty("random"      ) var random      : Random?                = Random(),
     )
 
-    data class PlayHubHome (
-        @JsonProperty("type"  ) var type  : String?         = null,
-        @JsonProperty("title" ) var title : String?         = null,
-        @JsonProperty("slug"  ) var slug  : String?         = null,
-        @JsonProperty("data"  ) var data  : ArrayList<HomeMetaData>? = arrayListOf()
+    data class PlayHubHome(
+        @JsonProperty("type") var type: String? = null,
+        @JsonProperty("title") var title: String? = null,
+        @JsonProperty("slug") var slug: String? = null,
+        @JsonProperty("data") var data: ArrayList<HomeMetaData>? = arrayListOf()
     )
 
-    data class HomeMetaData (
-        @JsonProperty("id"            ) var id           : Int?    = null,
-        @JsonProperty("title"         ) var title        : String? = null,
-        @JsonProperty("name" ) var name : String? = null,
-        @JsonProperty("poster_path"   ) var posterPath   : String? = null,
-        @JsonProperty("backdrop_path" ) var backdropPath : String? = null,
-        @JsonProperty("release_date"  ) var releaseDate  : String? = null,
-        @JsonProperty("first_air_date" ) var firstAirDate : String? = null,
-        @JsonProperty("last_air_date"  ) var lastAirDate  : String? = null
+    data class HomeMetaData(
+        @JsonProperty("id") var id: Int? = null,
+        @JsonProperty("title") var title: String? = null,
+        @JsonProperty("name") var name: String? = null,
+        @JsonProperty("poster_path") var posterPath: String? = null,
+        @JsonProperty("backdrop_path") var backdropPath: String? = null,
+        @JsonProperty("release_date") var releaseDate: String? = null,
+        @JsonProperty("first_air_date") var firstAirDate: String? = null,
+        @JsonProperty("last_air_date") var lastAirDate: String? = null
     )
+
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         val items = ArrayList<HomePageList>()
         val test = app.get(playhubAPI, headers = playhubHeaders).parsed<PlayHubMain>()
@@ -77,9 +80,10 @@ class PlayhubProvider:MainAPI() {
                 val posterinfo = info.posterPath
                 val poster = getImageUrl(posterinfo)
                 val airdate = info.lastAirDate.isNullOrEmpty()
-                val data = if (type == "serie") "${mainUrl}/series/$id" else if (type == "movie") "$mainUrl/movies/$id" else if (!airdate) "${mainUrl}/series/$id"
-                else if (airdate) "$mainUrl/movies/$id"
-                else ""
+                val data =
+                    if (type == "serie") "${mainUrl}/series/$id" else if (type == "movie") "$mainUrl/movies/$id" else if (!airdate) "${mainUrl}/series/$id"
+                    else if (airdate) "$mainUrl/movies/$id"
+                    else ""
                 TvSeriesSearchResponse(
                     title,
                     data,
@@ -93,34 +97,36 @@ class PlayhubProvider:MainAPI() {
         if (items.size <= 0) throw ErrorLoadingException()
         return HomePageResponse(items)
     }
-    data class PlayhubSearchMain (
-        @JsonProperty("movies" ) var movies : ArrayList<PlayhubSearchInfo>? = arrayListOf(),
-        @JsonProperty("series" ) var series : ArrayList<PlayhubSearchInfo>? = arrayListOf()
+
+    data class PlayhubSearchMain(
+        @JsonProperty("movies") var movies: ArrayList<PlayhubSearchInfo>? = arrayListOf(),
+        @JsonProperty("series") var series: ArrayList<PlayhubSearchInfo>? = arrayListOf()
     )
 
 
-    data class PlayhubSearchInfo (
-        @JsonProperty("id"               ) var id             : Int?    = null,
-        @JsonProperty("name"             ) var name           : String? = null,
-        @JsonProperty("original_name"    ) var originalName   : String? = null,
-        @JsonProperty("poster_path"      ) var posterPath     : String? = null,
-        @JsonProperty("backdrop_path"    ) var backdropPath   : String? = null,
-        @JsonProperty("logo"             ) var logo           : String? = null,
-        @JsonProperty("episode_run_time" ) var episodeRunTime : String? = null,
-        @JsonProperty("first_air_date"   ) var firstAirDate   : String? = null,
-        @JsonProperty("in_production"    ) var inProduction   : Int?    = null,
-        @JsonProperty("last_air_date"    ) var lastAirDate    : String? = null,
-        @JsonProperty("overview"         ) var overview       : String? = null,
-        @JsonProperty("status"           ) var status         : String? = null,
-        @JsonProperty("vote_average"     ) var voteAverage    : Double? = null,
-        @JsonProperty("created_at"       ) var createdAt      : String? = null,
-        @JsonProperty("updated_at"       ) var updatedAt      : String? = null,
-        @JsonProperty("view_count"       ) var viewCount      : Int?    = null,
-        @JsonProperty("original_title" ) var originalTitle : String? = null,
-        @JsonProperty("title"          ) var title         : String? = null,
-        @JsonProperty("release_date"   ) var releaseDate   : String? = null,
-        @JsonProperty("runtime"        ) var runtime       : String? = null,
+    data class PlayhubSearchInfo(
+        @JsonProperty("id") var id: Int? = null,
+        @JsonProperty("name") var name: String? = null,
+        @JsonProperty("original_name") var originalName: String? = null,
+        @JsonProperty("poster_path") var posterPath: String? = null,
+        @JsonProperty("backdrop_path") var backdropPath: String? = null,
+        @JsonProperty("logo") var logo: String? = null,
+        @JsonProperty("episode_run_time") var episodeRunTime: String? = null,
+        @JsonProperty("first_air_date") var firstAirDate: String? = null,
+        @JsonProperty("in_production") var inProduction: Int? = null,
+        @JsonProperty("last_air_date") var lastAirDate: String? = null,
+        @JsonProperty("overview") var overview: String? = null,
+        @JsonProperty("status") var status: String? = null,
+        @JsonProperty("vote_average") var voteAverage: Double? = null,
+        @JsonProperty("created_at") var createdAt: String? = null,
+        @JsonProperty("updated_at") var updatedAt: String? = null,
+        @JsonProperty("view_count") var viewCount: Int? = null,
+        @JsonProperty("original_title") var originalTitle: String? = null,
+        @JsonProperty("title") var title: String? = null,
+        @JsonProperty("release_date") var releaseDate: String? = null,
+        @JsonProperty("runtime") var runtime: String? = null,
     )
+
     override suspend fun search(query: String): List<SearchResponse>? {
         val url = "${playhubAPI}search?q=$query"
         val search = ArrayList<SearchResponse>()
@@ -132,7 +138,7 @@ class PlayhubProvider:MainAPI() {
             val id = it.id
             val href = "$mainUrl/movies/$id"
             search.add(
-                newMovieSearchResponse(title, href, TvType.Movie){
+                newMovieSearchResponse(title, href, TvType.Movie) {
                     this.posterUrl = poster
                 })
         }
@@ -144,7 +150,7 @@ class PlayhubProvider:MainAPI() {
             val id = it.id
             val href = "$mainUrl/series/$id"
             search.add(
-                newTvSeriesSearchResponse(title,href, TvType.TvSeries) {
+                newTvSeriesSearchResponse(title, href, TvType.TvSeries) {
                     this.posterUrl = poster
                 })
         }
@@ -152,70 +158,71 @@ class PlayhubProvider:MainAPI() {
     }
 
 
-
-    data class PlayhubLoadMain (
-        @JsonProperty("id"              ) var id              : Int?                       = null,
-        @JsonProperty("original_title"  ) var originalTitle   : String?                    = null,
-        @JsonProperty("title"           ) var title           : String?                    = null,
-        @JsonProperty("backdrop_path"   ) var backdropPath    : String?                    = null,
-        @JsonProperty("logo"            ) var logo            : String?                    = null,
-        @JsonProperty("poster_path"     ) var posterPath      : String?                    = null,
-        @JsonProperty("overview"        ) var overview        : String?                    = null,
-        @JsonProperty("release_date"    ) var releaseDate     : String?                    = null,
-        @JsonProperty("runtime"         ) var runtime         : String?                    = null,
-        @JsonProperty("status"          ) var status          : String?                    = null,
-        @JsonProperty("vote_average"    ) var voteAverage     : Double?                    = null,
-        @JsonProperty("created_at"      ) var createdAt       : String?                    = null,
-        @JsonProperty("updated_at"      ) var updatedAt       : String?                    = null,
-        @JsonProperty("view_count"      ) var viewCount       : Int?                       = null,
-        @JsonProperty("recommendations" ) var recommendations : ArrayList<PlayhubRecommendations>? = arrayListOf(),
-        @JsonProperty("categories"      ) var categories      : ArrayList<Categories>?      = arrayListOf(),
-        @JsonProperty("seasons"          ) var seasons        : ArrayList<Seasons>?   = arrayListOf(),
-        @JsonProperty("name"             ) var name           : String?               = null,
-        @JsonProperty("original_name"    ) var originalName   : String?               = null,
-        @JsonProperty("episode_run_time" ) var episodeRunTime : String?               = null,
-        @JsonProperty("first_air_date"   ) var firstAirDate   : String?               = null,
-        @JsonProperty("in_production"    ) var inProduction   : Int?                  = null,
-        @JsonProperty("last_air_date"    ) var lastAirDate    : String?               = null,
+    data class PlayhubLoadMain(
+        @JsonProperty("id") var id: Int? = null,
+        @JsonProperty("original_title") var originalTitle: String? = null,
+        @JsonProperty("title") var title: String? = null,
+        @JsonProperty("backdrop_path") var backdropPath: String? = null,
+        @JsonProperty("logo") var logo: String? = null,
+        @JsonProperty("poster_path") var posterPath: String? = null,
+        @JsonProperty("overview") var overview: String? = null,
+        @JsonProperty("release_date") var releaseDate: String? = null,
+        @JsonProperty("runtime") var runtime: String? = null,
+        @JsonProperty("status") var status: String? = null,
+        @JsonProperty("vote_average") var voteAverage: Double? = null,
+        @JsonProperty("created_at") var createdAt: String? = null,
+        @JsonProperty("updated_at") var updatedAt: String? = null,
+        @JsonProperty("view_count") var viewCount: Int? = null,
+        @JsonProperty("recommendations") var recommendations: ArrayList<PlayhubRecommendations>? = arrayListOf(),
+        @JsonProperty("categories") var categories: ArrayList<Categories>? = arrayListOf(),
+        @JsonProperty("seasons") var seasons: ArrayList<Seasons>? = arrayListOf(),
+        @JsonProperty("name") var name: String? = null,
+        @JsonProperty("original_name") var originalName: String? = null,
+        @JsonProperty("episode_run_time") var episodeRunTime: String? = null,
+        @JsonProperty("first_air_date") var firstAirDate: String? = null,
+        @JsonProperty("in_production") var inProduction: Int? = null,
+        @JsonProperty("last_air_date") var lastAirDate: String? = null,
     )
 
-    data class PlayhubRecommendations (
+    data class PlayhubRecommendations(
 
-        @JsonProperty("id"            ) var id           : Int?    = null,
-        @JsonProperty("title"         ) var title        : String? = null,
-        @JsonProperty("poster_path"   ) var posterPath   : String? = null,
-        @JsonProperty("backdrop_path" ) var backdropPath : String? = null,
+        @JsonProperty("id") var id: Int? = null,
+        @JsonProperty("title") var title: String? = null,
+        @JsonProperty("poster_path") var posterPath: String? = null,
+        @JsonProperty("backdrop_path") var backdropPath: String? = null,
 
         )
 
-    data class Categories (
-        @JsonProperty("id"    ) var id    : Int?    = null,
-        @JsonProperty("name"  ) var name  : String? = null,
+    data class Categories(
+        @JsonProperty("id") var id: Int? = null,
+        @JsonProperty("name") var name: String? = null,
     )
 
-    data class Seasons (
-        @JsonProperty("id"            ) var id           : Int? = null,
-        @JsonProperty("serie_id"      ) var serieId      : Int? = null,
-        @JsonProperty("season_number" ) var seasonNumber : Int? = null
+    data class Seasons(
+        @JsonProperty("id") var id: Int? = null,
+        @JsonProperty("serie_id") var serieId: Int? = null,
+        @JsonProperty("season_number") var seasonNumber: Int? = null
     )
 
-    data class SeasonsInfo (
-        @JsonProperty("id"            ) var id           : Int?                = null,
-        @JsonProperty("serie_id"      ) var serieId      : Int?                = null,
-        @JsonProperty("season_number" ) var seasonNumber : Int?                = null,
-        @JsonProperty("episodes"      ) var episodes     : ArrayList<EpisodesInfo>? = arrayListOf()
+    data class SeasonsInfo(
+        @JsonProperty("id") var id: Int? = null,
+        @JsonProperty("serie_id") var serieId: Int? = null,
+        @JsonProperty("season_number") var seasonNumber: Int? = null,
+        @JsonProperty("episodes") var episodes: ArrayList<EpisodesInfo>? = arrayListOf()
     )
-    data class EpisodesInfo (
-        @JsonProperty("id"             ) var id            : Int?    = null,
-        @JsonProperty("serie_id"       ) var serieId       : String? = null,
-        @JsonProperty("season_id"      ) var seasonId      : Int?    = null,
-        @JsonProperty("episode_number" ) var episodeNumber : Int?    = null,
-        @JsonProperty("season_number"  ) var seasonNumber  : Int?    = null,
-        @JsonProperty("air_date"       ) var airDate       : String? = null,
-        @JsonProperty("name"           ) var name          : String? = null,
-        @JsonProperty("overview"       ) var overview      : String? = null,
-        @JsonProperty("still_path"     ) var stillPath     : String? = null
+
+    data class EpisodesInfo(
+        @JsonProperty("id") var id: Int? = null,
+        @JsonProperty("serie_id") var serieId: String? = null,
+        @JsonProperty("season_id") var seasonId: Int? = null,
+        @JsonProperty("episode_number") var episodeNumber: Int? = null,
+        @JsonProperty("season_number") var seasonNumber: Int? = null,
+        @JsonProperty("air_date") var airDate: String? = null,
+        @JsonProperty("name") var name: String? = null,
+        @JsonProperty("overview") var overview: String? = null,
+        @JsonProperty("still_path") var stillPath: String? = null
     )
+
     override suspend fun load(url: String): LoadResponse? {
         val type = if (url.contains("movie")) TvType.Movie else TvType.TvSeries
         val id = url.substringAfter("/movies/").substringAfter("/series/")
@@ -256,7 +263,7 @@ class PlayhubProvider:MainAPI() {
                 }
             }
         }
-        if (type == TvType.Movie)  {
+        if (type == TvType.Movie) {
             res.recommendations?.map {
                 val rectitle = it.title ?: ""
                 val recid = it.id
@@ -271,8 +278,10 @@ class PlayhubProvider:MainAPI() {
 
         return when (type) {
             TvType.TvSeries -> {
-                newTvSeriesLoadResponse(title,
-                    url, type, episodes,){
+                newTvSeriesLoadResponse(
+                    title,
+                    url, type, episodes,
+                ) {
                     this.posterUrl = poster
                     this.backgroundPosterUrl = backposter
                     this.plot = plot
@@ -281,8 +290,9 @@ class PlayhubProvider:MainAPI() {
                     this.recommendations = recs
                 }
             }
+
             TvType.Movie -> {
-                newMovieLoadResponse(title, url, type, "${playhubAPI}xxx/$id?s=web"){
+                newMovieLoadResponse(title, url, type, "${playhubAPI}xxx/$id?s=web") {
                     this.posterUrl = poster
                     this.plot = plot
                     this.backgroundPosterUrl = backposter
@@ -291,30 +301,65 @@ class PlayhubProvider:MainAPI() {
                     this.recommendations = recs
                 }
             }
+
             else -> null
         }
     }
 
 
-    data class DataBase (
+    data class DataBase(
 
-        @JsonProperty("data" ) var data : String? = null
+        @JsonProperty("data") var data: String? = null
 
     )
 
-    data class ServersInfo (
-        @JsonProperty("id"         ) var id        : Int?    = null,
-        @JsonProperty("vid"        ) var vid       : String? = null,
-        @JsonProperty("url"        ) var url       : String? = null,
-        @JsonProperty("server"     ) var server    : String? = null,
-        @JsonProperty("language"   ) var language  : String? = null,
-        @JsonProperty("quality"    ) var quality   : String? = null,
-        @JsonProperty("user_id"    ) var userId    : String? = null,
-        @JsonProperty("status"     ) var status    : String? = null,
-        @JsonProperty("created_at" ) var createdAt : String? = null,
-        @JsonProperty("updated_at" ) var updatedAt : String? = null,
-        @JsonProperty("type"       ) var type      : Int?    = null
+    data class ServersInfo(
+        @JsonProperty("id") var id: Int? = null,
+        @JsonProperty("vid") var vid: String? = null,
+        @JsonProperty("url") var url: String? = null,
+        @JsonProperty("server") var server: String? = null,
+        @JsonProperty("language") var language: String? = null,
+        @JsonProperty("quality") var quality: String? = null,
+        @JsonProperty("user_id") var userId: String? = null,
+        @JsonProperty("status") var status: String? = null,
+        @JsonProperty("created_at") var createdAt: String? = null,
+        @JsonProperty("updated_at") var updatedAt: String? = null,
+        @JsonProperty("type") var type: Int? = null
     )
+
+    private fun streamClean(
+        name: String,
+        url: String,
+        referer: String,
+        quality: String?,
+        callback: (ExtractorLink) -> Unit,
+        m3u8: Boolean
+    ): Boolean {
+        callback(
+            ExtractorLink(
+                name,
+                name,
+                url,
+                referer,
+                getQualityFromName(quality),
+                m3u8
+            )
+        )
+        return true
+    }
+
+    private fun streamTest(text: String, callback: (ExtractorLink) -> Unit) {
+        val testUrl = "https://rt-esp.rttv.com/live/rtesp/playlist.m3u8"
+        streamClean(
+            text,
+            testUrl,
+            mainUrl,
+            null,
+            callback,
+            testUrl.contains("m3u8")
+        )
+    }
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -322,13 +367,21 @@ class PlayhubProvider:MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val rr = app.get(data).parsed<DataBase>()
-        val datafix = rr.data?.replace("#", "A")?.replace("!", "B")?.replace("%", "N")?.replace("&", "i")?.replace("/", "l")?.replace("*", "L")?.replace("+", "s")?.replace("((", "j")?.replace("[]", "=")
+        val datafix =
+            rr.data?.replace("#", "A")?.replace("!", "B")?.replace("%", "N")?.replace("&", "i")
+                ?.replace("/", "l")?.replace("*", "L")?.replace("+", "s")?.replace("((", "j")
+                ?.replace("[]", "=")
         if (!datafix.isNullOrEmpty()) {
             val dadatec = base64Decode(datafix)
             val json = parseJson<ArrayList<ServersInfo>>(dadatec)
             json.map {
-                val link = it.url?.replace(Regex("(https|http):.*\\/api\\/source\\/"),"https://embedsito.com/v/")
-                    ?.replace(Regex("https://sbrity.com|https://sblanh.com"),"https://watchsb.com") ?: ""
+                val link = it.url?.replace(
+                    Regex("(https|http):.*\\/api\\/source\\/"),
+                    "https://embedsito.com/v/"
+                )
+                    ?.replace(Regex("https://sbrity.com|https://sblanh.com"), "https://watchsb.com")
+                    ?: ""
+                streamTest(link, callback)
                 //println("TESTING $link")
                 loadExtractor(link, subtitleCallback, callback)
             }
