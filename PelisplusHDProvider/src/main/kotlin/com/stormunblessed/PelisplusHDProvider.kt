@@ -311,7 +311,12 @@ class PelisplusHDProvider : MainAPI() {
         }
     }
 
-    suspend fun streamwishExtractor(url: String, data: String, callback: (ExtractorLink) -> Unit) {
+    suspend fun streamwishExtractor(
+        url: String,
+        data: String,
+        callback: (ExtractorLink) -> Unit,
+        nameExt: String = ""
+    ) {
         try {
             val doc = app.get(
                 url,
@@ -336,14 +341,16 @@ class PelisplusHDProvider : MainAPI() {
             val regex = """sources: \[\{file:"(.*?)"""".toRegex()
             val match = regex.find(scriptContent ?: "")
             val extractedurl = match?.groupValues?.get(1) ?: ""
-            streamClean(
-                "streamwish.to",
-                extractedurl,
-                mainUrl,
-                null,
-                callback,
-                extractedurl.contains("m3u8")
-            )
+            if (!extractedurl.isNullOrBlank()) {
+                streamClean(
+                    "streamwish.to $nameExt",
+                    extractedurl,
+                    mainUrl,
+                    null,
+                    callback,
+                    extractedurl.contains("m3u8")
+                )
+            }
         } catch (e: Throwable) {
         }
     }
