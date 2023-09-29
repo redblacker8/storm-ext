@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.getQualityFromName
 import com.lagradost.cloudstream3.utils.loadExtractor
 import java.util.*
 
@@ -35,7 +36,7 @@ class AnimeflvnetProvider : MainAPI() {
         TvType.Anime,
     )
 
-    override suspend fun getMainPage(page: Int, request : MainPageRequest): HomePageResponse {
+    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val urls = listOf(
             Pair("$mainUrl/browse?type[]=movie&order=updated", "Películas"),
             Pair("$mainUrl/browse?status[]=2&order=default", "Animes"),
@@ -58,7 +59,8 @@ class AnimeflvnetProvider : MainAPI() {
                         this.posterUrl = fixUrl(poster)
                         addDubStatus(getDubStatus(title), epNum)
                     }
-                }, isHorizontal)
+                }, isHorizontal
+            )
         )
 
         urls.apmap { (url, name) ->
@@ -105,13 +107,14 @@ class AnimeflvnetProvider : MainAPI() {
             }
         }
     }
+
     override suspend fun search(query: String): List<SearchResponse> {
         val doc = app.get("$mainUrl/browse?q=$query").document
         val sss = doc.select("ul.ListAnimes article").map { ll ->
             val title = ll.selectFirst("h3")?.text() ?: ""
             val image = ll.selectFirst("figure img")?.attr("src") ?: ""
             val href = ll.selectFirst("a")?.attr("href") ?: ""
-            newAnimeSearchResponse(title, href){
+            newAnimeSearchResponse(title, href) {
                 this.posterUrl = image
                 addDubStatus(getDubStatus(title))
             }
@@ -179,10 +182,91 @@ class AnimeflvnetProvider : MainAPI() {
                     it.replace("https://embedsb.com/e/", "https://watchsb.com/e/")
                         .replace("https://ok.ru", "http://ok.ru")
                 }.apmap {
-                    loadExtractor(it, data, subtitleCallback, callback)
+                    if (it.startsWith("https://streamwish.to")) {
+                        streamwishExtractor(it, data, callback)
+                    } else {
+                        loadExtractor(it, data, subtitleCallback, callback)
+                    }
                 }
             }
         }
         return true
+    }
+
+    private fun streamClean(
+        name: String,
+        url: String,
+        referer: String,
+        quality: String?,
+        callback: (ExtractorLink) -> Unit,
+        m3u8: Boolean
+    ): Boolean {
+        callback(
+            ExtractorLink(
+                name,
+                name,
+                url,
+                referer,
+                getQualityFromName(quality),
+                m3u8
+            )
+        )
+        return true
+    }
+
+    private fun stremTest(text: String, callback: (ExtractorLink) -> Unit) {
+        val testUrl = "https://rt-esp.rttv.com/live/rtesp/playlist.m3u8"
+        streamClean(
+            text,
+            testUrl,
+            mainUrl,
+            null,
+            callback,
+            testUrl.contains("m3u8")
+        )
+    }
+
+    suspend fun streamwishExtractor(
+        url: String,
+        data: String,
+        callback: (ExtractorLink) -> Unit,
+        nameExt: String = ""
+    ) {
+        try {
+            val doc = app.get(
+                url,
+                headers = mapOf(
+                    "User-Agent" to USER_AGENT,
+                    "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+                    "Accept-Language" to "en-GB,en;q=0.9,en-US;q=0.8,es-MX;q=0.7,es;q=0.6",
+                    "Connection" to "keep-alive",
+                    "Referer" to data,
+                    "Sec-Fetch-Dest" to "iframe",
+                    "Sec-Fetch-Mode" to "navigate",
+                    "Sec-Fetch-Site" to "cross-site",
+                    "Sec-Fetch-User" to "?1",
+                    "Upgrade-Insecure-Requests" to "1",
+                ),
+                allowRedirects = false
+            ).document
+            var script = doc.select("script").find {
+                it.html().contains("jwplayer(\"vplayer\").setup(")
+            }
+            var scriptContent = script?.html()
+            val regex = """sources: \[\{file:"(.*?)"""".toRegex()
+            val match = regex.find(scriptContent ?: "")
+            val extractedurl = match?.groupValues?.get(1) ?: ""
+            if (!extractedurl.isNullOrBlank()) {
+                streamClean(
+                    "streamwish.to $nameExt",
+                    extractedurl,
+                    mainUrl,
+                    null,
+                    callback,
+                    extractedurl.contains("m3u8")
+                )
+            }
+        } catch (e: Throwable) {
+        }
     }
 }

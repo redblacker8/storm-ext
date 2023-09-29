@@ -1,5 +1,6 @@
 package com.lagradost.cloudstream3.movieproviders
 
+import android.util.Log
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addDuration
 import com.lagradost.cloudstream3.mvvm.logError
@@ -7,7 +8,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.loadExtractor
 
 class SeriesflixProvider : MainAPI() {
-    override var mainUrl = "https://seriesflix.video"
+    override var mainUrl = "https://seriesflix.lat"
     override var name = "Seriesflix"
     override var lang = "es"
     override val hasMainPage = true
@@ -178,43 +179,14 @@ class SeriesflixProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        app.get(data).document.select("ul.ListOptions li").forEach {
-            val movieID = it.attr("data-id")
-            val serverID = it.attr("data-key")
-            val type = if (data.contains("movies")) 1 else 2
-            val url =
-                "$mainUrl/?trembed=$serverID&trid=$movieID&trtype=$type" //This is to get the POST key value
+        app.get(data).document.select("ul.optnslst li div.Button").forEach {
+            val urlBase64 = it.attr("data-url")
+            val url = base64Decode(urlBase64)
             val doc1 = app.get(url).document
-            doc1.select("div.Video iframe").apmap {
-                val iframe = it.attr("src")
-                val postkey =
-                    iframe.replace("https://sc.seriesflix.video/index.php?h=", "") // this obtains
-                // djNIdHNCR2lKTGpnc3YwK3pyRCs3L2xkQmljSUZ4ai9ibTcza0JRODNMcmFIZ0hPejdlYW0yanJIL2prQ1JCZA POST KEY
-                app.post(
-                    "https://sc.seriesflix.video/r.php",
-                    headers = mapOf(
-                        "Host" to "sc.seriesflix.video",
-                        "User-Agent" to USER_AGENT,
-                        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-                        "Accept-Language" to "en-US,en;q=0.5",
-                        "Content-Type" to "application/x-www-form-urlencoded",
-                        "Origin" to "null",
-                        "DNT" to "1",
-                        "Alt-Used" to "sc.seriesflix.video",
-                        "Connection" to "keep-alive",
-                        "Upgrade-Insecure-Requests" to "1",
-                        "Sec-Fetch-Dest" to "iframe",
-                        "Sec-Fetch-Mode" to "navigate",
-                        "Sec-Fetch-Site" to "same-origin",
-                        "Sec-Fetch-User" to "?1",
-                    ),
-                    params = mapOf(Pair("h", postkey)),
-                    data = mapOf(Pair("h", postkey)),
-                    allowRedirects = false
-                ).okhttpResponse.headers.values("location").apmap { link ->
-                    val url1 = link.replace("#bu", "")
-                    loadExtractor(url1, data, subtitleCallback, callback)
-                }
+            doc1.select("iframe").apmap {
+                val url2 = it.attr("src")
+                Log.e("TAG", "loadLinks: $url2")
+                loadExtractor(url2, mainUrl, subtitleCallback, callback)
             }
         }
         return true

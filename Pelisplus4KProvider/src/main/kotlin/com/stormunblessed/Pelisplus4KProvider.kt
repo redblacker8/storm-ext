@@ -145,6 +145,26 @@ class Pelisplus4KProvider : MainAPI() {
         }
     }
 
+    override suspend fun loadLinks(
+        data: String,
+        isCasting: Boolean,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        val doc = app.get(data).document
+        doc.select(".subselect li").apmap {
+            val hashOrURL: String = it.attr("data-server")
+
+            if (URLUtil.isValidUrl(hashOrURL)) {
+                loadExtractor(hashOrURL, data, subtitleCallback, callback)
+            } else {
+                hashLoader(hashOrURL, data, subtitleCallback, callback)
+            }
+
+        }
+        return true
+    }
+
     private fun streamClean(
         name: String,
         url: String,
@@ -176,26 +196,6 @@ class Pelisplus4KProvider : MainAPI() {
             callback,
             testUrl.contains("m3u8")
         )
-    }
-
-    override suspend fun loadLinks(
-        data: String,
-        isCasting: Boolean,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
-    ): Boolean {
-        val doc = app.get(data).document
-        doc.select(".subselect li").apmap {
-            val hashOrURL: String = it.attr("data-server")
-
-            if (URLUtil.isValidUrl(hashOrURL)) {
-                loadExtractor(hashOrURL, data, subtitleCallback, callback)
-            } else {
-                hashLoader(hashOrURL, data, subtitleCallback, callback)
-            }
-
-        }
-        return true
     }
 
     suspend fun hashLoader(
