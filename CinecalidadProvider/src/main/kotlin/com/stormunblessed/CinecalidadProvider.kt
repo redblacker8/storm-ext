@@ -1,10 +1,13 @@
 package com.lagradost.cloudstream3.movieproviders
 
 import android.net.Uri
+import android.util.Log
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.extractors.Cinestart
 import com.lagradost.cloudstream3.extractors.Okrulink
+import com.lagradost.cloudstream3.network.CloudflareKiller
+import com.lagradost.cloudstream3.network.WebViewResolver
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import com.lagradost.cloudstream3.utils.AppUtils.toJson
@@ -12,8 +15,14 @@ import com.lagradost.cloudstream3.utils.JsUnpacker
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.getQualityFromName
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
+import okio.IOException
+import org.jsoup.nodes.Element
 import java.net.URI
 
 class CinecalidadProvider : MainAPI() {
@@ -28,6 +37,7 @@ class CinecalidadProvider : MainAPI() {
         TvType.TvSeries,
     )
     override val vpnStatus = VPNStatus.MightBeNeeded //Due to evoload sometimes not loading
+    private val cloudflareKiller by lazy { CloudflareKiller() }
 
     override val mainPage = mainPageOf(
         Pair("$mainUrl/ver-serie/page/", "Series"),
@@ -127,59 +137,66 @@ class CinecalidadProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse? {
-        val soup = app.get(url, timeout = 120).document
-
-        val title = soup.selectFirst(".single_left h1")!!.text()
-        val description = soup.selectFirst("div.single_left table tbody tr td p")?.text()?.trim()
-        val poster: String? = soup.selectFirst(".alignnone")!!.attr("data-src")
-        val episodes = soup.select("div.se-c div.se-a ul.episodios li").map { li ->
-            val href = li.selectFirst("a")!!.attr("href")
-            val epThumb = li.selectFirst("img.lazy")!!.attr("data-src")
-            val name = li.selectFirst(".episodiotitle a")!!.text()
-            val seasonid =
-                li.selectFirst(".numerando")!!.text().replace(Regex("(S|E)"), "").let { str ->
-                    str.split("-").mapNotNull { subStr -> subStr.toIntOrNull() }
-                }
-            val isValid = seasonid.size == 2
-            val episode = if (isValid) seasonid.getOrNull(1) else null
-            val season = if (isValid) seasonid.getOrNull(0) else null
-            Episode(
-                href,
-                name,
-                season,
-                episode,
-                if (epThumb.contains("svg")) null else epThumb
+        try {
+            var resp = app.get(
+                url
             )
-        }
-        return when (val tvType =
-            if (url.contains("/ver-pelicula/")) TvType.Movie else TvType.TvSeries) {
-            TvType.TvSeries -> {
-                TvSeriesLoadResponse(
-                    title,
-                    url,
-                    this.name,
-                    tvType,
-                    episodes,
-                    poster,
-                    null,
-                    description,
+            var body = resp.document
+            val title = body.select(".single_left h1").first()!!.text()
+            val description =
+                body.selectFirst("div.single_left table tbody tr td p")?.text()?.trim()
+            val poster: String? = body.selectFirst(".alignnone")!!.attr("data-src")
+            val episodes = body.select("div.se-c div.se-a ul.episodios li").map { li ->
+                val href = li.selectFirst("a")!!.attr("href")
+                val epThumb = li.selectFirst("img.lazy")!!.attr("data-src")
+                val name = li.selectFirst(".episodiotitle a")!!.text()
+                val seasonid =
+                    li.selectFirst(".numerando")!!.text().replace(Regex("(S|E)"), "").let { str ->
+                        str.split("-").mapNotNull { subStr -> subStr.toIntOrNull() }
+                    }
+                val isValid = seasonid.size == 2
+                val episode = if (isValid) seasonid.getOrNull(1) else null
+                val season = if (isValid) seasonid.getOrNull(0) else null
+                Episode(
+                    href,
+                    name,
+                    season,
+                    episode,
+                    if (epThumb.contains("svg")) null else epThumb
                 )
             }
+            return when (val tvType =
+                if (url.contains("/ver-pelicula/")) TvType.Movie else TvType.TvSeries) {
+                TvType.TvSeries -> {
+                    TvSeriesLoadResponse(
+                        title,
+                        url,
+                        this.name,
+                        tvType,
+                        episodes,
+                        poster,
+                        null,
+                        description,
+                    )
+                }
 
-            TvType.Movie -> {
-                MovieLoadResponse(
-                    title,
-                    url,
-                    this.name,
-                    tvType,
-                    url,
-                    poster,
-                    null,
-                    description,
-                )
+                TvType.Movie -> {
+                    MovieLoadResponse(
+                        title,
+                        url,
+                        this.name,
+                        tvType,
+                        url,
+                        poster,
+                        null,
+                        description,
+                    )
+                }
+
+                else -> null
             }
-
-            else -> null
+        } catch (e: Throwable) {
+            return null
         }
     }
 
