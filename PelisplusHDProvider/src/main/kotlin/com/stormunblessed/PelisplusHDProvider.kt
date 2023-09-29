@@ -2,6 +2,7 @@ package com.lagradost.cloudstream3.movieproviders
 
 import android.net.Uri
 import android.util.Base64
+import android.webkit.URLUtil
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.AppUtils.parseJson
@@ -12,6 +13,7 @@ import com.lagradost.cloudstream3.utils.loadExtractor
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.jsoup.nodes.Element
+import java.net.URL
 import javax.crypto.Cipher
 import javax.crypto.spec.SecretKeySpec
 
@@ -222,47 +224,62 @@ class PelisplusHDProvider : MainAPI() {
                 .apmap { link ->
                     val regex = """go_to_player\('(.*?)'""".toRegex()
                     regex.findAll(app.get(link).document.html()).toList().apmap {
-                        val link =
-                            base64Decode(
-                                it?.groupValues?.get(1) ?: ""
-                            )
-                        if (link.contains("https://api.mycdn.moe/video/") || link.contains("https://api.mycdn.moe/embed.php?customid")) {
-                            val doc = app.get(link).document
-                            doc.select("div.ODDIV li").apmap {
-                                val linkencoded = it.attr("data-r")
-                                val linkdecoded = base64Decode(linkencoded)
-                                    .replace(
-                                        Regex("https://owodeuwu.xyz|https://sypl.xyz"),
-                                        "https://embedsito.com"
-                                    )
-                                    .replace(Regex(".poster.*"), "")
-                                val secondlink =
-                                    it.attr("onclick").substringAfter("go_to_player('")
-                                        .substringBefore("',")
-                                loadExtractor(linkdecoded, link, subtitleCallback, callback)
-                                val restwo = app.get(
-                                    "https://api.mycdn.moe/player/?id=$secondlink",
-                                    allowRedirects = false
-                                ).document
-                                val thirdlink = restwo.selectFirst("body > iframe")?.attr("src")
-                                    ?.replace(
-                                        Regex("https://owodeuwu.xyz|https://sypl.xyz"),
-                                        "https://embedsito.com"
-                                    )
-                                    ?.replace(Regex(".poster.*"), "")
-                                loadExtractor(thirdlink!!, link, subtitleCallback, callback)
-
-                            }
-                        } else if (link.startsWith("https://filemoon.sx")) {
-                            filemoonsxExtractor(link, data, callback)
-                        } else if (link.startsWith("https://streamwish.to")) {
-                            streamwishExtractor(link, data, callback)
-                        } else if (link.startsWith("https://doodstream.com")) {
-                            doodstreamExtractor(link, data, callback)
-                        } else if (link.startsWith("https://plusvip.net")) {
-                            plusvipnetExtractor(link, data, callback)
+                        val current = it?.groupValues?.get(1) ?: ""
+                        var link: String? = null
+                        if (URLUtil.isValidUrl(current)) {
+                            link = fixUrl(current)
                         } else {
-                            loadExtractor(link, data, subtitleCallback, callback)
+                            try {
+                                link =
+                                    base64Decode(
+                                        it?.groupValues?.get(1) ?: ""
+                                    )
+                            } catch (e: Throwable) {
+                            }
+                        }
+
+                        if (!link.isNullOrBlank()) {
+                            if (link.contains("https://api.mycdn.moe/video/") || link.contains(
+                                    "https://api.mycdn.moe/embed.php?customid"
+                                )
+                            ) {
+                                val doc = app.get(link).document
+                                doc.select("div.ODDIV li").apmap {
+                                    val linkencoded = it.attr("data-r")
+                                    val linkdecoded = base64Decode(linkencoded)
+                                        .replace(
+                                            Regex("https://owodeuwu.xyz|https://sypl.xyz"),
+                                            "https://embedsito.com"
+                                        )
+                                        .replace(Regex(".poster.*"), "")
+                                    val secondlink =
+                                        it.attr("onclick").substringAfter("go_to_player('")
+                                            .substringBefore("',")
+                                    loadExtractor(linkdecoded, link, subtitleCallback, callback)
+                                    val restwo = app.get(
+                                        "https://api.mycdn.moe/player/?id=$secondlink",
+                                        allowRedirects = false
+                                    ).document
+                                    val thirdlink = restwo.selectFirst("body > iframe")?.attr("src")
+                                        ?.replace(
+                                            Regex("https://owodeuwu.xyz|https://sypl.xyz"),
+                                            "https://embedsito.com"
+                                        )
+                                        ?.replace(Regex(".poster.*"), "")
+                                    loadExtractor(thirdlink!!, link, subtitleCallback, callback)
+
+                                }
+                            } else if (link.startsWith("https://filemoon.sx")) {
+                                filemoonsxExtractor(link, data, callback)
+                            } else if (link.startsWith("https://streamwish.to")) {
+                                streamwishExtractor(link, data, callback)
+                            } else if (link.startsWith("https://doodstream.com")) {
+                                doodstreamExtractor(link, data, callback)
+                            } else if (link.startsWith("https://plusvip.net")) {
+                                plusvipnetExtractor(link, data, callback)
+                            } else {
+                                loadExtractor(link, data, subtitleCallback, callback)
+                            }
                         }
                     }
                 }
