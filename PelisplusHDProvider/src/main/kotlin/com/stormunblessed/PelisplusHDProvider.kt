@@ -400,9 +400,9 @@ class PelisplusHDProvider : MainAPI() {
             val match = regex.find(htmlContent)
             val endpoint = match?.groupValues?.get(1) ?: ""
             val baseurl = app.get(
-                "https://doods.pro" + endpoint,
+                "https://ds2play.com" + endpoint,
                 headers = mapOf(
-                    "Host" to "doods.pro",
+                    "Host" to "ds2play.com",
                     "User-Agent" to USER_AGENT,
                     "Accept" to "*/*",
                     "Accept-Language" to "en-US,en;q=0.5",
@@ -432,7 +432,7 @@ class PelisplusHDProvider : MainAPI() {
             streamClean(
                 "doodstream.com",
                 extractedUrl,
-                referer,
+                "https://ds2play.com/",
                 null,
                 callback,
                 false

@@ -26,7 +26,7 @@ import org.jsoup.nodes.Element
 import java.net.URI
 
 class CinecalidadProvider : MainAPI() {
-    override var mainUrl = "https://cinecalidad.cat"
+    override var mainUrl = "https://cinecalidad.men"
     override var name = "Cinecalidad"
     override var lang = "es"
     override val hasMainPage = true
@@ -214,7 +214,7 @@ class CinecalidadProvider : MainAPI() {
         doc.select("div #playeroptions li").apmap {
             try {
                 val url = it.attr("data-option").replace("youtube", "")
-                if (url.contains("""https:\/\/v\d+.cinecalidad.men\/vipembed""".toRegex())) {
+                if (url.contains("""https?://(\w+\.)?cinecalidad\.\w+/vipembed""".toRegex())) {
                     val res = app.get(
                         url,
                         headers = mapOf(
