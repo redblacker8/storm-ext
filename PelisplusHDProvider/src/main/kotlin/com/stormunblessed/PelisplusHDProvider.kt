@@ -18,7 +18,7 @@ import javax.crypto.Cipher
 import javax.crypto.spec.SecretKeySpec
 
 class PelisplusHDProvider : MainAPI() {
-    override var mainUrl = "https://pelisplushd.dev"
+    override var mainUrl = "https://pelisplushd.nz"
     override var name = "PelisplusHD"
     override var lang = "es"
     override val hasMainPage = true
