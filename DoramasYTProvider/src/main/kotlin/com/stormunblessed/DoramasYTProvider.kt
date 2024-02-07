@@ -198,7 +198,8 @@ class DoramasYTProvider : MainAPI() {
     suspend fun doodstreamExtractor(
         url: String,
         data: String,
-        callback: (ExtractorLink) -> Unit
+        callback: (ExtractorLink) -> Unit,
+        nameExt: String = ""
     ) {
         try {
             val result = app.get(
@@ -253,7 +254,7 @@ class DoramasYTProvider : MainAPI() {
 
             val extractedUrl = baseurl + makePlay()
             streamClean(
-                "doodstream.com",
+                "doodstream.com $nameExt",
                 extractedUrl,
                 "https://ds2play.com/",
                 null,
