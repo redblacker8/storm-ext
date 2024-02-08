@@ -330,9 +330,9 @@ class CuevanaProvider : MainAPI() {
             val match = regex.find(htmlContent)
             val endpoint = match?.groupValues?.get(1) ?: ""
             val baseurl = app.get(
-                "https://ds2play.com" + endpoint,
+                "https://d0000d.com" + endpoint,
                 headers = mapOf(
-                    "Host" to "ds2play.com",
+                    "Host" to "d0000d.com",
                     "User-Agent" to USER_AGENT,
                     "Accept" to "*/*",
                     "Accept-Language" to "en-US,en;q=0.5",
@@ -355,14 +355,14 @@ class CuevanaProvider : MainAPI() {
                     result += chars[randomIndex]
                 }
                 val now = System.currentTimeMillis() + 5000
-                return "$result?token=sfqpjbi1vlvjr16o02wb7wa8&expiry=$now"
+                return "$result?token=gt7on07cqyy9nnzd6drfdj3z&expiry=$now"
             }
 
             val extractedUrl = baseurl + makePlay()
             streamClean(
                 "doodstream.com $nameExt",
                 extractedUrl,
-                "https://ds2play.com/",
+                "https://d0000d.com/",
                 null,
                 callback,
                 false

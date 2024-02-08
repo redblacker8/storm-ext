@@ -260,7 +260,7 @@ class AnimeflvnetProvider : MainAPI() {
                 streamClean(
                     "streamwish.to $nameExt",
                     extractedurl,
-                    mainUrl,
+                    "https://streamwish.to/",
                     null,
                     callback,
                     extractedurl.contains("m3u8")
