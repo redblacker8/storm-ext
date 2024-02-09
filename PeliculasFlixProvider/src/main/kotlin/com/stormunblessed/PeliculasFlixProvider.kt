@@ -199,7 +199,7 @@ class PeliculasFlixProvider:MainAPI() {
                     ///nothing
                 }
             } else {
-                loadExtractor(link!!, subtitleCallback, callback)
+                Extractors.mainExtractor(link!!, mainUrl, subtitleCallback, callback)
             }
         }
         return true

@@ -3,6 +3,7 @@ package com.lagradost.cloudstream3.animeproviders
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.loadExtractor
+import com.stormunblessed.Extractors
 import java.util.*
 
 
@@ -143,7 +144,7 @@ class MonoschinosProvider : MainAPI() {
             val urlDecoded = base64Decode(encodedurl)
             val url = (urlDecoded).replace("https://monoschinos2.com/reproductor?url=", "")
                 .replace("https://sblona.com","https://watchsb.com")
-            loadExtractor(url, mainUrl, subtitleCallback, callback)
+            Extractors.mainExtractor(url, mainUrl, subtitleCallback, callback)
         }
         return true
     }

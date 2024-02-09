@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.utils.AppUtils.parseJson
+import com.stormunblessed.Extractors
 import java.util.*
 import kotlin.collections.ArrayList
 
@@ -162,7 +163,7 @@ class TioAnimeProvider:MainAPI() {
                     it.replace("https://embedsb.com/e/","https://watchsb.com/e/")
                         .replace("https://ok.ru","http://ok.ru")
                 }.toList().apmap {
-                    loadExtractor(it, subtitleCallback, callback)
+                    Extractors.mainExtractor(it, mainUrl, subtitleCallback, callback)
                 }
             }
         }
