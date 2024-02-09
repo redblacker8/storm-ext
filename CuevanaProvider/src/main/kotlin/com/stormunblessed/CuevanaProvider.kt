@@ -3,15 +3,12 @@ package com.lagradost.cloudstream3.movieproviders
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
-import com.lagradost.cloudstream3.mvvm.logError
-import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.getQualityFromName
-import com.lagradost.cloudstream3.utils.loadExtractor
-import org.mozilla.javascript.Context
+import com.stormunblessed.Extractors
+
 
 class CuevanaProvider : MainAPI() {
-    override var mainUrl = "https://cuevana.biz"
+    override var mainUrl = "https://wwv.cuevana8.com"
     override var name = "Cuevana"
     override var lang = "es"
     override val hasMainPage = true
@@ -97,7 +94,7 @@ class CuevanaProvider : MainAPI() {
                 yearRegex.find(year1)?.destructured?.component1()?.replace(Regex("<span>|</span>"), "")
         val year = if (yearf.isNullOrBlank()) null else yearf.toIntOrNull()
         val episodes = soup.select(".all-episodes li.TPostMv article").map { li ->
-            val href = "$mainUrl${li.select("a").attr("href") }"
+            val href = "$mainUrl${li.select("a").attr("href")}"
             val epThumb =
                     li.selectFirst("div.Image img")?.attr("data-src")
                             ?: li.selectFirst("img.lazy")!!
@@ -187,188 +184,11 @@ class CuevanaProvider : MainAPI() {
                 val playerUrl = fixUrl(it.attr("data-tr"))
                 val playerHtml = app.get(playerUrl, allowRedirects = false)
                 fetchUrls(playerHtml.document.selectFirst("html body script")!!.html()).apmap {
-                    if (it.startsWith("https://filelions.to")) {
-                        filelionsLoader(it, data, callback, lang)
-                    } else if (it.startsWith("https://doodstream.com")) {
-                        doodstreamExtractor(it, data, callback, lang)
-                    } else {
-                        loadExtractor(it, data, subtitleCallback, callback)
-                    }
+                    Extractors.mainExtractor(it, data, subtitleCallback, callback, lang)
                 }
             }
         }
         return true
-    }
-
-    private fun streamClean(
-            name: String,
-            url: String,
-            referer: String,
-            quality: String?,
-            callback: (ExtractorLink) -> Unit,
-            m3u8: Boolean
-    ): Boolean {
-        callback(
-                ExtractorLink(
-                        name,
-                        name,
-                        url,
-                        referer,
-                        getQualityFromName(quality),
-                        m3u8
-                )
-        )
-        return true
-    }
-
-    private fun streamTest(text: String, callback: (ExtractorLink) -> Unit) {
-        val testUrl = "https://rt-esp.rttv.com/live/rtesp/playlist.m3u8"
-        streamClean(
-                text,
-                testUrl,
-                mainUrl,
-                null,
-                callback,
-                testUrl.contains("m3u8")
-        )
-    }
-
-    suspend fun filelionsLoader(
-            url: String,
-            data: String,
-            callback: (ExtractorLink) -> Unit,
-            nameExt: String = ""
-    ) {
-        try {
-            val doc = app.get(
-                    url,
-                    headers = mapOf(
-                            "User-Agent" to USER_AGENT,
-                            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-                            "Accept-Language" to "en-GB,en;q=0.9,en-US;q=0.8,es-MX;q=0.7,es;q=0.6",
-                            "Connection" to "keep-alive",
-                            "Referer" to data,
-                            "Sec-Fetch-Dest" to "iframe",
-                            "Sec-Fetch-Mode" to "navigate",
-                            "Sec-Fetch-Site" to "cross-site",
-                            "Sec-Fetch-User" to "?1",
-                            "Upgrade-Insecure-Requests" to "1",
-                    ),
-                    allowRedirects = false
-            ).document
-            var script = doc.select("script").find {
-                it.html().contains("eval(function(p,a,c,k,e,d)")
-            }
-            var scriptContent = script?.html()
-            var cx = Context.enter()
-            cx.optimizationLevel = -1
-            var scope = cx.initStandardObjects()
-            cx.evaluateString(
-                    scope, """
-                                    var $
-                                    $ = {
-                                        ajaxSetup: () => {
-                                            $ = () => ({on: () => null}) 
-                                        }
-                                    }
-                                    var init = {}
-                                    var jwplayer = function(info){
-                                        return {
-                                            setup: (data) => init = data,
-                                            on: (name,callback) => null,
-                                            geturl: () => init.sources[0].file,
-                                            addButton: () => null,
-                                            seek: () => null,
-                                            getPosition: () => null,
-                                        }
-                                    }
-                                """.trimIndent(), "script1", 1, null
-            )
-            cx.evaluateString(scope, scriptContent, "script2", 1, null)
-            var result = cx.evaluateString(scope, "init.sources[0].file", "script3", 1, null)
-            var finalUrl = result.toString()
-            if (!finalUrl.isNullOrBlank()) {
-                streamClean(
-                        "filelions.to $nameExt",
-                        finalUrl,
-                        mainUrl,
-                        null,
-                        callback,
-                        finalUrl.contains("m3u8")
-                )
-            }
-        } catch (e: Throwable) {
-        }
-    }
-
-    suspend fun doodstreamExtractor(
-        url: String,
-        data: String,
-        callback: (ExtractorLink) -> Unit,
-        nameExt: String = ""
-    ) {
-        try {
-            val result = app.get(
-                url,
-                headers = mapOf(
-                    "User-Agent" to USER_AGENT,
-                    "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-                    "Accept-Language" to "en-GB,en;q=0.9,en-US;q=0.8,es-MX;q=0.7,es;q=0.6",
-                    "Connection" to "keep-alive",
-                    "Referer" to data,
-                    "Sec-Fetch-Dest" to "iframe",
-                    "Sec-Fetch-Mode" to "navigate",
-                    "Sec-Fetch-Site" to "cross-site",
-                    "Sec-Fetch-User" to "?1",
-                    "Upgrade-Insecure-Requests" to "1",
-                ),
-                allowRedirects = true
-            )
-            val htmlContent = result.document.html()
-            val referer = result.url
-            val regex = """'(/pass_md5/.*?)'""".toRegex()
-            val match = regex.find(htmlContent)
-            val endpoint = match?.groupValues?.get(1) ?: ""
-            val baseurl = app.get(
-                "https://d0000d.com" + endpoint,
-                headers = mapOf(
-                    "Host" to "d0000d.com",
-                    "User-Agent" to USER_AGENT,
-                    "Accept" to "*/*",
-                    "Accept-Language" to "en-US,en;q=0.5",
-                    "Connection" to "keep-alive",
-                    "Referer" to referer,
-                    "Sec-Fetch-Dest" to "empty",
-                    "Sec-Fetch-Mode" to "cors",
-                    "Sec-Fetch-Site" to "same-origin",
-                    "Sec-Fetch-User" to "?1",
-                    "Upgrade-Insecure-Requests" to "1",
-                )
-            ).document.text()
-
-            fun makePlay(): String {
-                val chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
-                val charsLength = chars.length
-                var result = ""
-                for (i in 0..9) {
-                    val randomIndex = (Math.random() * charsLength).toInt()
-                    result += chars[randomIndex]
-                }
-                val now = System.currentTimeMillis() + 5000
-                return "$result?token=gt7on07cqyy9nnzd6drfdj3z&expiry=$now"
-            }
-
-            val extractedUrl = baseurl + makePlay()
-            streamClean(
-                "doodstream.com $nameExt",
-                extractedUrl,
-                "https://d0000d.com/",
-                null,
-                callback,
-                false
-            )
-        } catch (e: Throwable) {
-        }
     }
 }
 

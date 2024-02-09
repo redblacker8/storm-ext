@@ -8,6 +8,7 @@ import com.lagradost.cloudstream3.utils.M3u8Helper.Companion.generateM3u8
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.getQualityFromName
 import com.lagradost.cloudstream3.utils.loadExtractor
+import com.stormunblessed.Extractors
 import java.util.*
 
 class AnimeflvIOProvider:MainAPI() {
@@ -222,7 +223,7 @@ class AnimeflvIOProvider:MainAPI() {
                     }
                 }
             }
-            loadExtractor(url, data, subtitleCallback, callback)
+            Extractors.mainExtractor(url, data, subtitleCallback, callback)
         }
         return true
     }

@@ -272,14 +272,14 @@ class DoramasFlixProvider:MainAPI() {
             val parse = parseJson<List<LinksOnline>>(data)
             parse.map {
                 val link = it.link
-                loadExtractor(link!!, data, subtitleCallback, callback)
+                Extractors.mainExtractor(link!!, data, subtitleCallback, callback)
             }
         } else {
             val episodeslinkRequestbody = "{\"operationName\":\"detailEpisodeLinks\",\"variables\":{\"episode_slug\":\"$data\"},\"query\":\"query detailEpisodeLinks(\$episode_slug: String!) {\\n  detailEpisode(filter: {slug: \$episode_slug, type_serie: \\\"dorama\\\"}) {\\n    links_online\\n   }\\n}\\n\"}"
             val request = app.post(doraflixapi, requestBody = episodeslinkRequestbody.toRequestBody(mediaType)).parsedSafe<MainDoramas>()
             request?.data?.detailEpisode?.linksOnline?.map {
                 val link = it.link
-                loadExtractor(link!!, data, subtitleCallback, callback)
+                Extractors.mainExtractor(link!!, data, subtitleCallback, callback)
             }
         }
         return true

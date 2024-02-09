@@ -31,36 +31,38 @@ class AnimeflvnetProvider : MainAPI() {
     override val hasDownloadSupport = true
     override val hasQuickSearch = true
     override val supportedTypes = setOf(
-        TvType.AnimeMovie,
-        TvType.OVA,
-        TvType.Anime,
+            TvType.AnimeMovie,
+            TvType.OVA,
+            TvType.Anime,
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val urls = listOf(
-            Pair("$mainUrl/browse?type[]=movie&order=updated", "Películas"),
-            Pair("$mainUrl/browse?status[]=2&order=default", "Animes"),
-            Pair("$mainUrl/browse?status[]=1&order=rating", "En emision"),
+                Pair("$mainUrl/browse?type[]=movie&order=updated", "Películas"),
+                Pair("$mainUrl/browse?status[]=2&order=default", "Animes"),
+                Pair("$mainUrl/browse?status[]=1&order=rating", "En emision"),
         )
         val items = ArrayList<HomePageList>()
         val isHorizontal = true
         items.add(
-            HomePageList(
-                "Últimos episodios",
-                app.get(mainUrl).document.select("main.Main ul.ListEpisodios li").mapNotNull {
-                    val title = it.selectFirst("strong.Title")?.text() ?: return@mapNotNull null
-                    val poster = it.selectFirst("span img")?.attr("src") ?: return@mapNotNull null
-                    val epRegex = Regex("(-(\\d+)\$)")
-                    val url = it.selectFirst("a")?.attr("href")?.replace(epRegex, "")
-                        ?.replace("ver/", "anime/") ?: return@mapNotNull null
-                    val epNum =
-                        it.selectFirst("span.Capi")?.text()?.replace("Episodio ", "")?.toIntOrNull()
-                    newAnimeSearchResponse(title, url) {
-                        this.posterUrl = fixUrl(poster)
-                        addDubStatus(getDubStatus(title), epNum)
-                    }
-                }, isHorizontal
-            )
+                HomePageList(
+                        "Últimos episodios",
+                        app.get(mainUrl).document.select("main.Main ul.ListEpisodios li").mapNotNull {
+                            val title = it.selectFirst("strong.Title")?.text()
+                                    ?: return@mapNotNull null
+                            val poster = it.selectFirst("span img")?.attr("src")
+                                    ?: return@mapNotNull null
+                            val epRegex = Regex("(-(\\d+)\$)")
+                            val url = it.selectFirst("a")?.attr("href")?.replace(epRegex, "")
+                                    ?.replace("ver/", "anime/") ?: return@mapNotNull null
+                            val epNum =
+                                    it.selectFirst("span.Capi")?.text()?.replace("Episodio ", "")?.toIntOrNull()
+                            newAnimeSearchResponse(title, url) {
+                                this.posterUrl = fixUrl(poster)
+                                addDubStatus(getDubStatus(title), epNum)
+                            }
+                        }, isHorizontal
+                )
         )
 
         urls.apmap { (url, name) ->
@@ -69,8 +71,8 @@ class AnimeflvnetProvider : MainAPI() {
                 val title = it.selectFirst("h3.Title")?.text() ?: return@mapNotNull null
                 val poster = it.selectFirst("figure img")?.attr("src") ?: return@mapNotNull null
                 newAnimeSearchResponse(
-                    title,
-                    fixUrl(it.selectFirst("a")?.attr("href") ?: return@mapNotNull null)
+                        title,
+                        fixUrl(it.selectFirst("a")?.attr("href") ?: return@mapNotNull null)
                 ) {
                     this.posterUrl = fixUrl(poster)
                     addDubStatus(getDubStatus(title))
@@ -84,17 +86,17 @@ class AnimeflvnetProvider : MainAPI() {
     }
 
     data class SearchObject(
-        @JsonProperty("id") val id: String,
-        @JsonProperty("title") val title: String,
-        @JsonProperty("type") val type: String,
-        @JsonProperty("last_id") val lastId: String,
-        @JsonProperty("slug") val slug: String
+            @JsonProperty("id") val id: String,
+            @JsonProperty("title") val title: String,
+            @JsonProperty("type") val type: String,
+            @JsonProperty("last_id") val lastId: String,
+            @JsonProperty("slug") val slug: String
     )
 
     override suspend fun quickSearch(query: String): List<SearchResponse> {
         val response = app.post(
-            "https://www3.animeflv.net/api/animes/search",
-            data = mapOf(Pair("value", query))
+                "https://www3.animeflv.net/api/animes/search",
+                data = mapOf(Pair("value", query))
         ).text
         val json = parseJson<List<SearchObject>>(response)
         return json.map { searchr ->
@@ -135,7 +137,7 @@ class AnimeflvnetProvider : MainAPI() {
             else -> null
         }
         val genre = doc.select("nav.Nvgnrs a")
-            .map { it?.text()?.trim().toString() }
+                .map { it?.text()?.trim().toString() }
 
         doc.select("script").map { script ->
             if (script.data().contains("var episodes = [")) {
@@ -148,12 +150,12 @@ class AnimeflvnetProvider : MainAPI() {
                     val epthumb = "https://cdn.animeflv.net/screenshots/$animeid/$epNum/th_3.jpg"
                     val link = url.replace("/anime/", "/ver/") + "-$epNum"
                     episodes.add(
-                        Episode(
-                            link,
-                            null,
-                            posterUrl = epthumb,
-                            episode = epNum.toIntOrNull()
-                        )
+                            Episode(
+                                    link,
+                                    null,
+                                    posterUrl = epthumb,
+                                    episode = epNum.toIntOrNull()
+                            )
                     )
                 }
             }
@@ -168,105 +170,24 @@ class AnimeflvnetProvider : MainAPI() {
     }
 
     override suspend fun loadLinks(
-        data: String,
-        isCasting: Boolean,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
+            data: String,
+            isCasting: Boolean,
+            subtitleCallback: (SubtitleFile) -> Unit,
+            callback: (ExtractorLink) -> Unit
     ): Boolean {
         app.get(data).document.select("script").apmap { script ->
             if (script.data().contains("var videos = {") || script.data()
-                    .contains("var anime_id =") || script.data().contains("server")
+                            .contains("var anime_id =") || script.data().contains("server")
             ) {
                 val videos = script.data().replace("\\/", "/")
                 fetchUrls(videos).map {
                     it.replace("https://embedsb.com/e/", "https://watchsb.com/e/")
-                        .replace("https://ok.ru", "http://ok.ru")
+                            .replace("https://ok.ru", "http://ok.ru")
                 }.apmap {
-                    if (it.startsWith("https://streamwish.to")) {
-                        streamwishExtractor(it, data, callback)
-                    } else {
-                        loadExtractor(it, data, subtitleCallback, callback)
-                    }
+                    Extractors.mainExtractor(it, data, subtitleCallback, callback)
                 }
             }
         }
         return true
-    }
-
-    private fun streamClean(
-        name: String,
-        url: String,
-        referer: String,
-        quality: String?,
-        callback: (ExtractorLink) -> Unit,
-        m3u8: Boolean
-    ): Boolean {
-        callback(
-            ExtractorLink(
-                name,
-                name,
-                url,
-                referer,
-                getQualityFromName(quality),
-                m3u8
-            )
-        )
-        return true
-    }
-
-    private fun stremTest(text: String, callback: (ExtractorLink) -> Unit) {
-        val testUrl = "https://rt-esp.rttv.com/live/rtesp/playlist.m3u8"
-        streamClean(
-            text,
-            testUrl,
-            mainUrl,
-            null,
-            callback,
-            testUrl.contains("m3u8")
-        )
-    }
-
-    suspend fun streamwishExtractor(
-        url: String,
-        data: String,
-        callback: (ExtractorLink) -> Unit,
-        nameExt: String = ""
-    ) {
-        try {
-            val doc = app.get(
-                url,
-                headers = mapOf(
-                    "User-Agent" to USER_AGENT,
-                    "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-                    "Accept-Language" to "en-GB,en;q=0.9,en-US;q=0.8,es-MX;q=0.7,es;q=0.6",
-                    "Connection" to "keep-alive",
-                    "Referer" to data,
-                    "Sec-Fetch-Dest" to "iframe",
-                    "Sec-Fetch-Mode" to "navigate",
-                    "Sec-Fetch-Site" to "cross-site",
-                    "Sec-Fetch-User" to "?1",
-                    "Upgrade-Insecure-Requests" to "1",
-                ),
-                allowRedirects = false
-            ).document
-            var script = doc.select("script").find {
-                it.html().contains("jwplayer(\"vplayer\").setup(")
-            }
-            var scriptContent = script?.html()
-            val regex = """sources: \[\{file:"(.*?)"""".toRegex()
-            val match = regex.find(scriptContent ?: "")
-            val extractedurl = match?.groupValues?.get(1) ?: ""
-            if (!extractedurl.isNullOrBlank()) {
-                streamClean(
-                    "streamwish.to $nameExt",
-                    extractedurl,
-                    "https://streamwish.to/",
-                    null,
-                    callback,
-                    extractedurl.contains("m3u8")
-                )
-            }
-        } catch (e: Throwable) {
-        }
     }
 }
