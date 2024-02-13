@@ -152,7 +152,7 @@ class Extractors {
         ) {
             try {
                 val result = app.get(
-                        url.replace("https://dooood.com", "https://d0000d.com"),
+                        url.replace("https://dooood.com", "https://d0000d.com").replace("https://doodstream.com", "https://d0000d.com"),
                         headers = mapOf(
                                 "User-Agent" to USER_AGENT,
                                 "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
@@ -577,6 +577,7 @@ class Extractors {
             } catch (e: Throwable) {
             }
         }
+
         suspend fun streamtapeExtractor(url: String, data: String, callback: (ExtractorLink) -> Unit, nameExt: String = "") {
             try {
                 val doc = app.get(
@@ -601,7 +602,7 @@ class Extractors {
                 var scope = cx.initStandardObjects()
                 cx.evaluateString(scope, scriptContent, "url", 1, null)
                 var extractedurl = "https:${scope.get("url", scope)}&stream=1"
-                if(!extractedurl.isNullOrBlank()){
+                if (!extractedurl.isNullOrBlank()) {
                     streamClean(
                             "streamtape.com $nameExt",
                             extractedurl,
@@ -722,9 +723,8 @@ class Extractors {
         }
 
         public suspend fun mainExtractor(url: String, data: String, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit, nameExt: String = "") {
-            if(loadExtractor(url, data, subtitleCallback, callback)){
-                return
-            } else if (
+            loadExtractor(url, data, subtitleCallback, callback)
+            if (
                     url.startsWith("https://filelions.to") ||
                     url.startsWith("https://azipcdn.com") ||
                     url.startsWith("https://filelions.live") ||
@@ -732,7 +732,7 @@ class Extractors {
             ) {
                 filelionsLoader(url, data, callback, nameExt)
             } else if (url.startsWith("https://filemoon.sx")) {
-                filemoonsxExtractor(url, data, subtitleCallback, callback,nameExt)
+                filemoonsxExtractor(url, data, subtitleCallback, callback, nameExt)
             } else if (
                     url.startsWith("https://streamwish.to") ||
                     url.startsWith("https://wishembed.pro") ||

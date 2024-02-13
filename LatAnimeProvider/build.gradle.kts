@@ -1,5 +1,5 @@
 // use an integer for version numbers
-version = 5
+version = 1
 
 
 cloudstream {
@@ -18,9 +18,9 @@ cloudstream {
      * */
     status = 1 // will be 3 if unspecified
     tvTypes = listOf(
-        "TvSeries",
-        "Movie",
+        "Anime",
+        "OVA",
     )
 
-    iconUrl = "https://www.google.com/s2/favicons?domain=seriesmetro.net&sz=%size%"
+    iconUrl = "https://latanime.org/public/img/logito.png"
 }
