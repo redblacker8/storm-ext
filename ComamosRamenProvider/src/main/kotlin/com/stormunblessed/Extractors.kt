@@ -577,8 +577,46 @@ class Extractors {
             } catch (e: Throwable) {
             }
         }
+        suspend fun streamtapeExtractor(url: String, data: String, callback: (ExtractorLink) -> Unit, nameExt: String = "") {
+            try {
+                val doc = app.get(
+                        url,
+                        headers = mapOf(
+                                "User-Agent" to USER_AGENT,
+                                "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+                                "Accept-Language" to "en-GB,en;q=0.9,en-US;q=0.8,es-MX;q=0.7,es;q=0.6",
+                                "Connection" to "keep-alive",
+                                "Referer" to data,
+                                "Sec-Fetch-Dest" to "iframe",
+                                "Sec-Fetch-Mode" to "navigate",
+                                "Sec-Fetch-Site" to "cross-site",
+                                "Sec-Fetch-User" to "?1",
+                                "Upgrade-Insecure-Requests" to "1",
+                        ),
+                        allowRedirects = false
+                ).document
+                var scriptContent = doc.select("script").html().lines().find { it.contains("document.getElementById('botlink')") }?.replace("document.getElementById('botlink').innerHTML", "var url")
+                var cx = Context.enter()
+                cx.optimizationLevel = -1
+                var scope = cx.initStandardObjects()
+                cx.evaluateString(scope, scriptContent, "url", 1, null)
+                var extractedurl = "https:${scope.get("url", scope)}&stream=1"
+                if(!extractedurl.isNullOrBlank()){
+                    streamClean(
+                            "streamtape.com $nameExt",
+                            extractedurl,
+                            url,
+                            null,
+                            callback,
+                            extractedurl.contains("m3u8")
+                    )
+                }
+            } catch (e: Throwable) {
+            }
+        }
 
-        suspend fun vudeoExtractor(url: String, data: String, callback: (ExtractorLink) -> Unit, nameExt: String = "") {// TODO: link extracted succesfully but not plays
+        suspend fun
+                vudeoExtractor(url: String, data: String, callback: (ExtractorLink) -> Unit, nameExt: String = "") {// TODO: link extracted succesfully but not plays
             try {
                 val doc = app.get(
                         url,
@@ -622,9 +660,8 @@ class Extractors {
                 nameExt: String = ""
         ) {
             try {
-                val urlEdit = url.replace("https://filelions.live", "https://filelions.online")
                 val doc = app.get(
-                        urlEdit,
+                        url.replace("https://filelions.live", "https://filelions.online"),
                         headers = mapOf(
                                 "User-Agent" to USER_AGENT,
                                 "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
@@ -685,8 +722,9 @@ class Extractors {
         }
 
         public suspend fun mainExtractor(url: String, data: String, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit, nameExt: String = "") {
-            loadExtractor(url, data, subtitleCallback, callback)
-            if (
+            if(loadExtractor(url, data, subtitleCallback, callback)){
+                return
+            } else if (
                     url.startsWith("https://filelions.to") ||
                     url.startsWith("https://azipcdn.com") ||
                     url.startsWith("https://filelions.live") ||
@@ -721,6 +759,8 @@ class Extractors {
                 emturbovidExtractor(url, data, callback, nameExt)
             } else if (url.startsWith("https://vudeo.co")) {// TODO: Not plays
                 vudeoExtractor(url, data, callback, nameExt)
+            } else if (url.startsWith("https://streamtape.com")) {
+                streamtapeExtractor(url, data, callback, nameExt)
             }
         }
     }
