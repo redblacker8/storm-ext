@@ -18,7 +18,6 @@ class CablevisionHdProvider : MainAPI() {
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(
             TvType.Live,
-            TvType.NSFW,
     )
     val nowAllowed = setOf("Únete al chat", "Donar con Paypal", "Lizard Premium", "18+")
 
@@ -143,11 +142,6 @@ class CablevisionHdProvider : MainAPI() {
             "24/7",
     )
 
-    val xxxCat = setOf(
-            "18+",
-    )
-
-
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val items = ArrayList<HomePageList>()
         val urls = listOf(
@@ -158,13 +152,16 @@ class CablevisionHdProvider : MainAPI() {
                 Pair("Infantil", mainUrl),
                 Pair("Educacion", mainUrl),
                 Pair("24/7", mainUrl),
-                Pair("XXX", mainUrl),
                 Pair("Todos", mainUrl),
         )
         urls.apmap { (name, url) ->
             val doc = app.get(url).document
             val home = doc.select("div.page-scroll div#page_container.page-container.bg-move-effect div div#canales.row div.canal-item.col-6.col-xs-6.col-sm-6.col-md-3.col-lg-3").filterNot { element ->
-                element.selectFirst("div.lm-canal.lm-info-block.gray-default a h4")?.text().isNullOrBlank()
+                val text = element.selectFirst("div.lm-canal.lm-info-block.gray-default a h4")?.text()
+                        ?: ""
+                nowAllowed.any {
+                    text.contains(it, ignoreCase = true)
+                } || text.isNullOrBlank()
             }.filter {
                 val text = it.selectFirst("div.lm-canal.lm-info-block.gray-default a h4")?.text()?.trim()
                         ?: ""
@@ -174,38 +171,39 @@ class CablevisionHdProvider : MainAPI() {
                             text.equals(it, ignoreCase = true)
                         }
                     }
+
                     "Entretenimiento" -> {
                         entretenimientoCat.any {
                             text.equals(it, ignoreCase = true)
                         }
                     }
+
                     "Noticias" -> {
                         noticiasCat.any {
                             text.equals(it, ignoreCase = true)
                         }
                     }
+
                     "Peliculas" -> {
                         peliculasCat.any {
                             text.equals(it, ignoreCase = true)
                         }
                     }
+
                     "Infantil" -> {
                         infantilCat.any {
                             text.equals(it, ignoreCase = true)
                         }
                     }
+
                     "Educacion" -> {
                         educacionCat.any {
                             text.equals(it, ignoreCase = true)
                         }
                     }
+
                     "24/7" -> {
                         dos47Cat.any {
-                            text.contains(it, ignoreCase = true)
-                        }
-                    }
-                    "XXX" -> {
-                        xxxCat.any {
                             text.contains(it, ignoreCase = true)
                         }
                     }
@@ -223,7 +221,7 @@ class CablevisionHdProvider : MainAPI() {
                         title,
                         link,
                         this.name,
-                        if(name.equals("XXX")) TvType.NSFW else TvType.Live,
+                        TvType.Live,
                         fixUrl(img),
                         null,
                         null,
@@ -258,7 +256,7 @@ class CablevisionHdProvider : MainAPI() {
                     title,
                     link,
                     this.name,
-                    if(title.contains("18+")) TvType.NSFW else TvType.Live,
+                    TvType.Live,
                     fixUrl(img),
                     null,
                     null,
