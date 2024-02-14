@@ -1,5 +1,5 @@
 // use an integer for version numbers
-version = 1
+version = 2
 
 
 cloudstream {
@@ -19,6 +19,7 @@ cloudstream {
     status = 1 // will be 3 if unspecified
     tvTypes = listOf(
         "Live",
+        "NSFW",
     )
 
     iconUrl = "https://www.cablevisionhd.com/imge/cablevisionhd.png"
