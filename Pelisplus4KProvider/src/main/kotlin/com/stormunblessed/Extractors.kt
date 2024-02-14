@@ -20,12 +20,21 @@ import java.util.Arrays
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
+import java.net.URL
 
 
 class Extractors {
 
     companion object {
 
+        fun getBaseUrl(urlString: String): String {
+            val url = URL(urlString)
+            return "${url.protocol}://${url.host}"
+        }
+        fun getHostUrl(urlString: String): String {
+            val url = URL(urlString)
+            return url.host
+        }
         fun streamClean(
                 name: String,
                 url: String,
