@@ -213,9 +213,9 @@ class PelisplusHDProvider : MainAPI() {
                     .replace("https://api.mycdn.moe/sblink.php?id=", "https://streamsb.net/e/")
             )
                 .apmap { link ->
-                    val regex = """go_to_player\('(.*?)'""".toRegex()
+                    val regex = """(go_to_player|go_to_playerVast)\('(.*?)'""".toRegex()
                     regex.findAll(app.get(link).document.html()).toList().apmap {
-                        val current = it?.groupValues?.get(1) ?: ""
+                        val current = it?.groupValues?.get(2) ?: ""
                         var link: String? = null
                         if (URLUtil.isValidUrl(current)) {
                             link = fixUrl(current)
