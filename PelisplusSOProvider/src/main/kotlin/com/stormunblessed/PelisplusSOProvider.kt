@@ -12,8 +12,8 @@ import java.util.*
 
 
 class PelisplusSOProvider : MainAPI() {
-    override var mainUrl = "https://pelisplus.so"
-    override var name = "Pelisplus.so"
+    override var mainUrl = "https://pelisplusgo.vip"
+    override var name = "Pelisplusgo"
     override var lang = "es"
     override val hasMainPage = true
     override val hasChromecastSupport = true
