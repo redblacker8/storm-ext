@@ -1,0 +1,734 @@
+[
+    {
+        "url": "https://raw.githubusercontent.com/redblacker8/storm-ext/builds/AllCalidadProvider.cs3",
+        "status": 1,
+        "version": 1,
+        "name": "AllCalidadProvider",
+        "internalName": "AllCalidadProvider",
+        "authors": [
+            "redblacker8"
+        ],
+        "description": "Pel\u00edculas, series y animes online en HD.",
+        "fileSize": 35828,
+        "repositoryUrl": "https://github.com/redblacker8/storm-ext",
+        "language": "mx",
+        "tvTypes": [
+            "TvSeries",
+            "Movie",
+            "Anime"
+        ],
+        "iconUrl": "https://www.google.com/s2/favicons?domain=allcalidad.re&sz=%size%",
+        "apiVersion": 1,
+        "fileHash": "sha256-028b67fbde0b861ca085ee4f8c46d1afac3488a415a1cfacac4e0f70f0c02196"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/redblacker8/storm-ext/builds/AnimeAV1Provider.cs3",
+        "status": 1,
+        "version": 1,
+        "name": "AnimeAV1Provider",
+        "internalName": "AnimeAV1Provider",
+        "authors": [
+            "PiterWeb"
+        ],
+        "fileSize": 23304,
+        "repositoryUrl": "https://github.com/redblacker8/storm-ext",
+        "language": "mx",
+        "tvTypes": [
+            "Anime",
+            "OVA"
+        ],
+        "iconUrl": "https://www.google.com/s2/favicons?domain=animeav1.com&sz=%size%",
+        "apiVersion": 1,
+        "fileHash": "sha256-4d79bd112e751539c1c403a4dca2948d64c9ea95c3227bd38efb1277b9adb9fa"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/redblacker8/storm-ext/builds/AnimeflvProvider.cs3",
+        "status": 0,
+        "version": 6,
+        "name": "AnimeflvProvider",
+        "internalName": "AnimeflvProvider",
+        "authors": [
+            "Stormunblessed"
+        ],
+        "fileSize": 20894,
+        "repositoryUrl": "https://github.com/redblacker8/storm-ext",
+        "language": "mx",
+        "tvTypes": [
+            "Anime",
+            "OVA"
+        ],
+        "iconUrl": "https://www.google.com/s2/favicons?domain=animeflv.net&sz=%size%",
+        "apiVersion": 1,
+        "fileHash": "sha256-cf113e6bd61c40c6908491c16af2853c8b65f3fc386358b6a048d026685e3bf1"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/redblacker8/storm-ext/builds/AnimeJlProvider.cs3",
+        "status": 1,
+        "version": 5,
+        "name": "AnimeJlProvider",
+        "internalName": "AnimeJlProvider",
+        "authors": [
+            "redblacker8"
+        ],
+        "fileSize": 43053,
+        "repositoryUrl": "https://github.com/redblacker8/storm-ext",
+        "language": "mx",
+        "tvTypes": [
+            "Anime"
+        ],
+        "iconUrl": "https://www.anime-jl.net/favicon.ico",
+        "apiVersion": 1,
+        "fileHash": "sha256-592d84b2bdbdafba34fb857e03bfe0ade642a8737078c038a835d2ea2b35727e"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/redblacker8/storm-ext/builds/AreaDocumentalProvider.cs3",
+        "status": 1,
+        "version": 1,
+        "name": "AreaDocumentalProvider",
+        "internalName": "AreaDocumentalProvider",
+        "authors": [
+            "redblacker8"
+        ],
+        "fileSize": 18228,
+        "repositoryUrl": "https://github.com/redblacker8/storm-ext",
+        "language": "en",
+        "tvTypes": [
+            "Movie",
+            "TvSeries"
+        ],
+        "iconUrl": "https://www.area-documental.com/Favicons/favicon-96x96.png",
+        "apiVersion": 1,
+        "fileHash": "sha256-0c31c535498641013a249c134238c98efe1d397ebfedc9806a65b2612c5e9bae"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/redblacker8/storm-ext/builds/CablevisionHdProvider.cs3",
+        "status": 1,
+        "version": 7,
+        "name": "CablevisionHdProvider",
+        "internalName": "CablevisionHdProvider",
+        "authors": [
+            "redblacker8"
+        ],
+        "fileSize": 16309,
+        "repositoryUrl": "https://github.com/redblacker8/storm-ext",
+        "language": "mx",
+        "tvTypes": [
+            "Live"
+        ],
+        "iconUrl": "https://www.cablevisionhd.com/imge/cablevisionhd.png",
+        "apiVersion": 1,
+        "fileHash": "sha256-ae542c02c9b45c1e057dac197deb1e774291d4288f2dd01bffb9a4960def05e3"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/redblacker8/storm-ext/builds/CatalogoGeneral.cs3",
+        "status": 1,
+        "version": 1,
+        "name": "CatalogoGeneral",
+        "internalName": "CatalogoGeneral",
+        "authors": [
+            "redblacker8"
+        ],
+        "description": "Cat\u00e1logo general de TMDB en espa\u00f1ol: tendencias, populares, estrenos y g\u00e9neros. Delega reproducci\u00f3n a otros proveedores instalados.",
+        "fileSize": 42332,
+        "repositoryUrl": "https://github.com/redblacker8/storm-ext",
+        "language": "mx",
+        "tvTypes": [
+            "Movie",
+            "TvSeries"
+        ],
+        "iconUrl": "https://www.google.com/s2/favicons?domain=www.themoviedb.org&sz=%size%",
+        "apiVersion": 1,
+        "fileHash": "sha256-463d781727c4095d83fa59fceacc948197edb7be87aa5e66e4738af835e073fb"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/redblacker8/storm-ext/builds/CatalogoHboMax.cs3",
+        "status": 1,
+        "version": 1,
+        "name": "CatalogoHboMax",
+        "internalName": "CatalogoHboMax",
+        "authors": [
+            "redblacker8"
+        ],
+        "description": "Cat\u00e1logo HBO Max M\u00e9xico/LATAM en espa\u00f1ol: popular, mejor calificada, estrenos y g\u00e9neros. No aloja fuentes: busca contenido con la lupa del detalle.",
+        "fileSize": 42381,
+        "repositoryUrl": "https://github.com/redblacker8/storm-ext",
+        "language": "mx",
+        "tvTypes": [
+            "Movie",
+            "TvSeries"
+        ],
+        "iconUrl": "https://www.google.com/s2/favicons?domain=www.max.com&sz=%size%",
+        "apiVersion": 1,
+        "fileHash": "sha256-0ff1876bb7c4e33e8c90706e22c6e41c90499ae67e2089c00f0c4e0d0adf268e"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/redblacker8/storm-ext/builds/CatalogoInfantil.cs3",
+        "status": 1,
+        "version": 5,
+        "name": "CatalogoInfantil",
+        "internalName": "CatalogoInfantil",
+        "authors": [
+            "redblacker8"
+        ],
+        "description": "Cat\u00e1logo infantil y familiar clasificaci\u00f3n AA: recomendaciones, estrenos, tendencias y g\u00e9neros. No aloja fuentes: busca contenido con la lupa del detalle.",
+        "fileSize": 42955,
+        "repositoryUrl": "https://github.com/redblacker8/storm-ext",
+        "language": "mx",
+        "tvTypes": [
+            "Movie",
+            "TvSeries"
+        ],
+        "iconUrl": "https://www.google.com/s2/favicons?domain=www.themoviedb.org&sz=%size%",
+        "apiVersion": 1,
+        "fileHash": "sha256-2eba19b0ac13aba4ebef540b6dc03504913f3dbf23363d1aec3471c83bb8e183"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/redblacker8/storm-ext/builds/CatalogoNetflix.cs3",
+        "status": 1,
+        "version": 5,
+        "name": "CatalogoNetflix",
+        "internalName": "CatalogoNetflix",
+        "authors": [
+            "redblacker8"
+        ],
+        "description": "Cat\u00e1logo Netflix M\u00e9xico/LATAM en espa\u00f1ol: popular, mejor calificada, estrenos y g\u00e9neros. No aloja fuentes: busca contenido con la lupa del detalle.",
+        "fileSize": 46792,
+        "repositoryUrl": "https://github.com/redblacker8/storm-ext",
+        "language": "mx",
+        "tvTypes": [
+            "Movie",
+            "TvSeries"
+        ],
+        "iconUrl": "https://www.google.com/s2/favicons?domain=www.netflix.com&sz=%size%",
+        "apiVersion": 1,
+        "fileHash": "sha256-3d8e4a600b87aa33cada719f5ed4bc23d99d8f09bf013321cc8c7fab4170a92e"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/redblacker8/storm-ext/builds/CinecalidadProvider.cs3",
+        "status": 1,
+        "version": 7,
+        "name": "CinecalidadProvider",
+        "internalName": "CinecalidadProvider",
+        "authors": [
+            "Stormunblessed"
+        ],
+        "fileSize": 17111,
+        "repositoryUrl": "https://github.com/redblacker8/storm-ext",
+        "language": "mx",
+        "tvTypes": [
+            "TvSeries",
+            "Movie"
+        ],
+        "iconUrl": "https://www.google.com/s2/favicons?domain=cinecalidad.lol&sz=%size%",
+        "apiVersion": 1,
+        "fileHash": "sha256-6af59ea850390368536ad208e2fdc27139698add920db509a100bfed67b7ab9f"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/redblacker8/storm-ext/builds/CineHdPlusProvider.cs3",
+        "status": 1,
+        "version": 4,
+        "name": "CineHdPlusProvider",
+        "internalName": "CineHdPlusProvider",
+        "authors": [
+            "redblacker8"
+        ],
+        "fileSize": 20411,
+        "repositoryUrl": "https://github.com/redblacker8/storm-ext",
+        "language": "mx",
+        "tvTypes": [
+            "TvSeries",
+            "Movie"
+        ],
+        "iconUrl": "https://cinehdplus.org/wp-content/uploads/2021/11/favicon.png",
+        "apiVersion": 1,
+        "fileHash": "sha256-e7a231430b3ee1d5114da4452c7be9cb4b3608f3760501ce7d957f7229580c0a"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/redblacker8/storm-ext/builds/CuevanaProvider.cs3",
+        "status": 1,
+        "version": 15,
+        "name": "CuevanaProvider",
+        "internalName": "CuevanaProvider",
+        "authors": [
+            "Stormunblessed"
+        ],
+        "description": "La clasica pagina de peliculas y series.",
+        "fileSize": 26602,
+        "repositoryUrl": "https://github.com/redblacker8/storm-ext",
+        "language": "mx",
+        "tvTypes": [
+            "TvSeries",
+            "Movie"
+        ],
+        "iconUrl": "https://www.google.com/s2/favicons?domain=cuevana3.me&sz=%size%",
+        "apiVersion": 1,
+        "fileHash": "sha256-3b3c01ac4d04e34b7beed5969c1d6ad964b9bc957c3f892b9094d373974f17fc"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/redblacker8/storm-ext/builds/DeporTVProvider.cs3",
+        "status": 1,
+        "version": 31,
+        "name": "DeporTVProvider",
+        "internalName": "DeporTVProvider",
+        "authors": [
+            "redblacker8"
+        ],
+        "description": "Deportes eventos en vivo. Sports live events. Futbol. Soccer.",
+        "fileSize": 98215,
+        "repositoryUrl": "https://github.com/redblacker8/storm-ext",
+        "language": "mx",
+        "tvTypes": [
+            "Live"
+        ],
+        "iconUrl": "https://yt3.googleusercontent.com/T_d2j2xZMjAxPCehiFR6hAv7jE3swcUzfgV8wCXzv1IL7rCEDv3cgQtIxjdmLVyP6ZrSgIu0nw=s900-c-k-c0x00ffffff-no-rj",
+        "apiVersion": 1,
+        "fileHash": "sha256-727ec16561de5d33523e1494f205ea280f7bb5e6df765e6b772815e84c247276"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/redblacker8/storm-ext/builds/DocumaniaTVProvider.cs3",
+        "status": 1,
+        "version": 2,
+        "name": "DocumaniaTVProvider",
+        "internalName": "DocumaniaTVProvider",
+        "authors": [
+            "redblacker8"
+        ],
+        "fileSize": 19129,
+        "repositoryUrl": "https://github.com/redblacker8/storm-ext",
+        "language": "es",
+        "tvTypes": [
+            "Documentary",
+            "Movie"
+        ],
+        "iconUrl": "https://www.documaniatv.com/hotlink-ok/favicon-96x96.png",
+        "apiVersion": 1,
+        "fileHash": "sha256-07ce02d7ff6e334d3529cfb0296b352c084d19519d3ea41116a9fa227fbc9c38"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/redblacker8/storm-ext/builds/DoramasFlixProvider.cs3",
+        "status": 1,
+        "version": 8,
+        "name": "DoramasFlixProvider",
+        "internalName": "DoramasFlixProvider",
+        "authors": [
+            "Stormunblessed"
+        ],
+        "fileSize": 40433,
+        "repositoryUrl": "https://github.com/redblacker8/storm-ext",
+        "language": "mx",
+        "tvTypes": [
+            "AsianDrama"
+        ],
+        "iconUrl": "https://www.google.com/s2/favicons?domain=doramasflix.co&sz=%size%",
+        "apiVersion": 1,
+        "fileHash": "sha256-32fa90051611770ab71e9e84ae51fb99df2123cefcf0c791ac9505207a87a80b"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/redblacker8/storm-ext/builds/DoramasYTProvider.cs3",
+        "status": 1,
+        "version": 7,
+        "name": "DoramasYTProvider",
+        "internalName": "DoramasYTProvider",
+        "authors": [
+            "Stormunblessed"
+        ],
+        "fileSize": 19929,
+        "repositoryUrl": "https://github.com/redblacker8/storm-ext",
+        "language": "mx",
+        "tvTypes": [
+            "AsianDrama"
+        ],
+        "iconUrl": "https://www.google.com/s2/favicons?domain=doramasyt.com&sz=%size%",
+        "apiVersion": 1,
+        "fileHash": "sha256-7b2d374c6459dae63025dca3b5b591b7289e0e7875fb293a735cb047abe382c0"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/redblacker8/storm-ext/builds/EntrepeliculasyseriesProvider.cs3",
+        "status": 1,
+        "version": 9,
+        "name": "EntrepeliculasyseriesProvider",
+        "internalName": "EntrepeliculasyseriesProvider",
+        "authors": [
+            "Stormunblessed"
+        ],
+        "fileSize": 27764,
+        "repositoryUrl": "https://github.com/redblacker8/storm-ext",
+        "language": "mx",
+        "tvTypes": [
+            "TvSeries",
+            "Movie"
+        ],
+        "iconUrl": "https://www.google.com/s2/favicons?domain=entrepeliculasyseries.nz&sz=%size%",
+        "apiVersion": 1,
+        "fileHash": "sha256-bdf2b437025439d978cdd8e5e5eba73f285ad74c6c1018ea17d21ddd5c40d906"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/redblacker8/storm-ext/builds/HDFullProvider.cs3",
+        "status": 1,
+        "version": 5,
+        "name": "HDFullProvider",
+        "internalName": "HDFullProvider",
+        "authors": [
+            "redblacker8"
+        ],
+        "fileSize": 32702,
+        "repositoryUrl": "https://github.com/redblacker8/storm-ext",
+        "language": "es",
+        "tvTypes": [
+            "Movie",
+            "TvSeries"
+        ],
+        "iconUrl": "https://hdfullcdn.cc/favicon.ico",
+        "apiVersion": 1,
+        "fileHash": "sha256-f104e67b3fbdbe65bb9751462ebdfd2e1ae9d27129d0df78143cedc037a32b3d"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/redblacker8/storm-ext/builds/IzziGoProvider.cs3",
+        "status": 3,
+        "version": 16,
+        "name": "IzziGoProvider",
+        "internalName": "IzziGoProvider",
+        "authors": [
+            "redblacker8"
+        ],
+        "description": "izzi go (izzi telecom, M\u00e9xico). REQUIERE una cuenta izzi go con suscripci\u00f3n activa. Inicia sesi\u00f3n en: Ajustes del proveedor (icono de engranaje) -> izzi go Login.",
+        "fileSize": 62594,
+        "repositoryUrl": "https://github.com/redblacker8/storm-ext",
+        "language": "mx",
+        "tvTypes": [
+            "Movie",
+            "TvSeries",
+            "Live"
+        ],
+        "iconUrl": "https://www.izzigo.tv/webclient/img/favicon/apple-touch-icon.png",
+        "apiVersion": 1,
+        "fileHash": "sha256-8a60c0367f352514f5a7ade833cf31ea68ff99f1365ea5b2f014ab281a6754f6"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/redblacker8/storm-ext/builds/JKAnimeProvider.cs3",
+        "status": 1,
+        "version": 9,
+        "name": "JKAnimeProvider",
+        "internalName": "JKAnimeProvider",
+        "authors": [
+            "Stormunblessed"
+        ],
+        "fileSize": 35359,
+        "repositoryUrl": "https://github.com/redblacker8/storm-ext",
+        "language": "mx",
+        "tvTypes": [
+            "Anime",
+            "OVA"
+        ],
+        "iconUrl": "https://www.google.com/s2/favicons?domain=jkanime.net&sz=%size%",
+        "apiVersion": 1,
+        "fileHash": "sha256-bb5467379bf01cb23a81e26d430afe1b36ea2ebf7dc56160aa78de574e55f977"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/redblacker8/storm-ext/builds/LACartoonsProvider.cs3",
+        "status": 1,
+        "version": 5,
+        "name": "LACartoonsProvider",
+        "internalName": "LACartoonsProvider",
+        "authors": [
+            "Stormunblessed"
+        ],
+        "fileSize": 15241,
+        "repositoryUrl": "https://github.com/redblacker8/storm-ext",
+        "language": "es",
+        "tvTypes": [
+            "Cartoons",
+            "TvSeries"
+        ],
+        "iconUrl": "https://www.google.com/s2/favicons?domain=lacartoons.com&sz=%size%",
+        "apiVersion": 1,
+        "fileHash": "sha256-2bbdd43461dd4a11cd949649004e945fd6009ff519c0470ca653ff099e60a2a6"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/redblacker8/storm-ext/builds/LaMovieProvider.cs3",
+        "status": 1,
+        "version": 2,
+        "name": "LaMovieProvider",
+        "internalName": "LaMovieProvider",
+        "authors": [
+            "redblacker8"
+        ],
+        "fileSize": 26641,
+        "repositoryUrl": "https://github.com/redblacker8/storm-ext",
+        "language": "mx",
+        "tvTypes": [
+            "TvSeries",
+            "Movie",
+            "Anime"
+        ],
+        "iconUrl": "https://lamovie.org/wp-content/uploads/2025/05/cropped-La.movie_-32x32.png",
+        "apiVersion": 1,
+        "fileHash": "sha256-0e52d7aa601c44915e5d5e321bd858c5264e1c7a61a00271163dafd38afd31fd"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/redblacker8/storm-ext/builds/LatAnimeProvider.cs3",
+        "status": 1,
+        "version": 5,
+        "name": "LatAnimeProvider",
+        "internalName": "LatAnimeProvider",
+        "authors": [
+            "redblacker8"
+        ],
+        "description": "Anime en latino y subtitulado.",
+        "fileSize": 14206,
+        "repositoryUrl": "https://github.com/redblacker8/storm-ext",
+        "language": "mx",
+        "tvTypes": [
+            "Anime",
+            "OVA"
+        ],
+        "iconUrl": "https://latanime.org/public/img/logito.png",
+        "apiVersion": 1,
+        "fileHash": "sha256-b200d1ac06a03c94f9420fc4d14917a60810543bb3774ae2acb4d12b4cd6e3f4"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/redblacker8/storm-ext/builds/MonoschinosProvider.cs3",
+        "status": 1,
+        "version": 8,
+        "name": "MonoschinosProvider",
+        "internalName": "MonoschinosProvider",
+        "authors": [
+            "Stormunblessed"
+        ],
+        "fileSize": 15771,
+        "repositoryUrl": "https://github.com/redblacker8/storm-ext",
+        "language": "mx",
+        "tvTypes": [
+            "Anime",
+            "AnimeMovie",
+            "OVA"
+        ],
+        "iconUrl": "https://www.google.com/s2/favicons?domain=monoschinos.st&sz=%size%",
+        "apiVersion": 1,
+        "fileHash": "sha256-c74a4d3fd87fc546aab0cfa10011226b50645b344ac8fc10b646ecf9067fa78c"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/redblacker8/storm-ext/builds/MundoDonghuaProvider.cs3",
+        "status": 1,
+        "version": 4,
+        "name": "MundoDonghuaProvider",
+        "internalName": "MundoDonghuaProvider",
+        "authors": [
+            "Stormunblessed"
+        ],
+        "fileSize": 20753,
+        "repositoryUrl": "https://github.com/redblacker8/storm-ext",
+        "language": "es",
+        "tvTypes": [
+            "Anime",
+            "OVA",
+            "AnimeMovie"
+        ],
+        "iconUrl": "https://www.google.com/s2/favicons?domain=mundodonghua.com&sz=%size%",
+        "apiVersion": 1,
+        "fileHash": "sha256-17dd920fbc049242df2e754f54e4026833d4308b9a5b65ef1ab803e78f6d1471"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/redblacker8/storm-ext/builds/PeliculasFlixProvider.cs3",
+        "status": 1,
+        "version": 2,
+        "name": "PeliculasFlixProvider",
+        "internalName": "PeliculasFlixProvider",
+        "authors": [
+            "Stormunblessed"
+        ],
+        "fileSize": 34430,
+        "repositoryUrl": "https://github.com/redblacker8/storm-ext",
+        "language": "es",
+        "tvTypes": [
+            "Movie"
+        ],
+        "iconUrl": "https://peliculasflix.co/img/logo.png",
+        "apiVersion": 1,
+        "fileHash": "sha256-bf598a75b9a6acbe9859b565c575456a5b47bef03cf3ca8b25d5cd18290f4623"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/redblacker8/storm-ext/builds/PelispediaProvider.cs3",
+        "status": 1,
+        "version": 7,
+        "name": "PelispediaProvider",
+        "internalName": "PelispediaProvider",
+        "authors": [
+            "Stormunblessed"
+        ],
+        "fileSize": 16622,
+        "repositoryUrl": "https://github.com/redblacker8/storm-ext",
+        "language": "mx",
+        "tvTypes": [
+            "TvSeries",
+            "Movie"
+        ],
+        "iconUrl": "https://www.google.com/s2/favicons?domain=pelispedia.is&sz=%size%",
+        "apiVersion": 1,
+        "fileHash": "sha256-35e2f293ec7c6482fa0c9f8c1420ce38c1719f4f3b744884fb5bdd6ad83b4fd7"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/redblacker8/storm-ext/builds/Pelisplus4KProvider.cs3",
+        "status": 1,
+        "version": 13,
+        "name": "Pelisplus4KProvider",
+        "internalName": "Pelisplus4KProvider",
+        "authors": [
+            "Stormunblessed"
+        ],
+        "fileSize": 43482,
+        "repositoryUrl": "https://github.com/redblacker8/storm-ext",
+        "language": "mx",
+        "tvTypes": [
+            "Movie",
+            "TvSeries",
+            "AsianDrama",
+            "Anime"
+        ],
+        "iconUrl": "https://www.google.com/s2/favicons?domain=pelisplus.to&sz=%size%",
+        "apiVersion": 1,
+        "fileHash": "sha256-265d435328d26d83fef3c374ea1e4c08b216586a170f2356084a3909c149852e"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/redblacker8/storm-ext/builds/PelisplusHDProvider.cs3",
+        "status": 1,
+        "version": 10,
+        "name": "PelisplusHDProvider",
+        "internalName": "PelisplusHDProvider",
+        "authors": [
+            "Stormunblessed"
+        ],
+        "fileSize": 27342,
+        "repositoryUrl": "https://github.com/redblacker8/storm-ext",
+        "language": "mx",
+        "tvTypes": [
+            "TvSeries",
+            "Movie"
+        ],
+        "iconUrl": "https://www.google.com/s2/favicons?domain=pelisplushd.nu&sz=%size%",
+        "apiVersion": 1,
+        "fileHash": "sha256-f2eaf3218a4800105e2aa933e1e43809f2db58765c0f00cc6e6d99f395078217"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/redblacker8/storm-ext/builds/ReyDonghuaProvider.cs3",
+        "status": 1,
+        "version": 2,
+        "name": "ReyDonghuaProvider",
+        "internalName": "ReyDonghuaProvider",
+        "authors": [
+            "redblacker8"
+        ],
+        "fileSize": 16698,
+        "repositoryUrl": "https://github.com/redblacker8/storm-ext",
+        "language": "mx",
+        "tvTypes": [
+            "Anime"
+        ],
+        "iconUrl": "https://reydonghua.org/public/favicon.ico?v=4.71",
+        "apiVersion": 1,
+        "fileHash": "sha256-02dd0848a526ccceb037f338395884f71c196a068cb8b613cd2ea0ab33589433"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/redblacker8/storm-ext/builds/SeriesflixProvider.cs3",
+        "status": 1,
+        "version": 4,
+        "name": "SeriesflixProvider",
+        "internalName": "SeriesflixProvider",
+        "authors": [
+            "Stormunblessed"
+        ],
+        "fileSize": 22188,
+        "repositoryUrl": "https://github.com/redblacker8/storm-ext",
+        "language": "es",
+        "tvTypes": [
+            "TvSeries",
+            "Movie"
+        ],
+        "iconUrl": "https://www.google.com/s2/favicons?domain=seriesflix.video&sz=%size%",
+        "apiVersion": 1,
+        "fileHash": "sha256-428df2a66a46f8da8aed8446b294236ec037a896e4ab7800873c8466698692fd"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/redblacker8/storm-ext/builds/SeriesMetroProvider.cs3",
+        "status": 1,
+        "version": 4,
+        "name": "SeriesMetroProvider",
+        "internalName": "SeriesMetroProvider",
+        "authors": [
+            "Stormunblessed"
+        ],
+        "fileSize": 17193,
+        "repositoryUrl": "https://github.com/redblacker8/storm-ext",
+        "language": "mx",
+        "tvTypes": [
+            "TvSeries",
+            "Movie"
+        ],
+        "iconUrl": "https://www.google.com/s2/favicons?domain=seriesmetro.net&sz=%size%",
+        "apiVersion": 1,
+        "fileHash": "sha256-ab0489586f5aa1d4d114ac26288705909965894bc90d765f1f09b16b8a21fdc7"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/redblacker8/storm-ext/builds/SoloLatinoProvider.cs3",
+        "status": 1,
+        "version": 8,
+        "name": "SoloLatinoProvider",
+        "internalName": "SoloLatinoProvider",
+        "authors": [
+            "redblacker8"
+        ],
+        "description": "Peliculas, series, animes y cartoons en Espa\u00f1ol y Espa\u00f1ol Latio",
+        "fileSize": 31179,
+        "repositoryUrl": "https://github.com/redblacker8/storm-ext",
+        "language": "mx",
+        "tvTypes": [
+            "Movie",
+            "TvSeries",
+            "Anime",
+            "Cartoon"
+        ],
+        "iconUrl": "https://sololatino.net/wp-content/uploads/2020/10/cropped-logo-final-192x192.png",
+        "apiVersion": 1,
+        "fileHash": "sha256-297f225aef04026fe2cc48116fd7c359d97da8fae3fcd659eaf9a4c24dcc9e8b"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/redblacker8/storm-ext/builds/StreamedProvider.cs3",
+        "status": 1,
+        "version": 2,
+        "name": "StreamedProvider",
+        "internalName": "StreamedProvider",
+        "authors": [
+            "redblacker8"
+        ],
+        "description": "Multilang live sports",
+        "fileSize": 33288,
+        "repositoryUrl": "https://github.com/redblacker8/storm-ext",
+        "language": "en",
+        "tvTypes": [
+            "Live"
+        ],
+        "iconUrl": "https://streamed.pk/favicon.png",
+        "apiVersion": 1,
+        "fileHash": "sha256-d785b4ad7cad4fc68fea23cfdc03a3ae43748947527d52cb7bf81f35692c7161"
+    },
+    {
+        "url": "https://raw.githubusercontent.com/redblacker8/storm-ext/builds/TioAnimeProvider.cs3",
+        "status": 1,
+        "version": 4,
+        "name": "TioAnimeProvider",
+        "internalName": "TioAnimeProvider",
+        "authors": [
+            "Stormunblessed"
+        ],
+        "fileSize": 19203,
+        "repositoryUrl": "https://github.com/redblacker8/storm-ext",
+        "language": "es",
+        "tvTypes": [
+            "Anime",
+            "OVA"
+        ],
+        "iconUrl": "https://www.google.com/s2/favicons?domain=tioanime.com&sz=%size%",
+        "apiVersion": 1,
+        "fileHash": "sha256-db7a9111e1fcef5f8ec69d17e3ffee2f6df558edb7ad09bbc6842174dd12eca4"
+    }
+]
