@@ -143,7 +143,7 @@ class DeporTVProvider : MainAPI() {
             ),
             Site(
                 SiteKey.FUTBOLLIBRE,
-                "https://futbol-libres.su",
+                "https://futbollibrehd.net",
                 "/agenda/"
             ),
             Site(
