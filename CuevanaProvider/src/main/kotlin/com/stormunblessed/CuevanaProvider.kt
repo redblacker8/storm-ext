@@ -149,7 +149,7 @@ class CuevanaProvider : MainAPI() {
             yearRegex.find(year1)?.destructured?.component1()?.replace(Regex("<span>|</span>"), "")
         val year = if (yearf.isNullOrBlank()) null else yearf.toIntOrNull()
         val episodes = soup.select("script#__NEXT_DATA__").firstOrNull()?.let {
-            parseSeriesData(it.html())?.props?.pageProps?.thisSerie?.seasons?.flatMap { season ->
+            parseSeriesData(it.html())?.props?.pageProps?.thisSerie?.seasons?.filter { season -> season.number > 0 && season.episodes.isNotEmpty() }?.flatMap { season ->
                 season.episodes.amap {
                     newEpisode(it.url.slug.replace("series/", "$mainUrl/serie/")
                             .replace("seasons/", "temporada/")
