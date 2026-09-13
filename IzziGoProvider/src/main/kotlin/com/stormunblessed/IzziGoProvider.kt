@@ -1,5 +1,6 @@
 package com.stormunblessed
 
+import android.util.Log
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.lagradost.cloudstream3.Episode
@@ -245,49 +246,63 @@ class IzziGoProvider(private val api: IzziGoApi) : MainAPI() {
         callback: (ExtractorLink) -> Unit,
     ): Boolean {
         val ref = tryParseJson<IzziRef>(data) ?: return false
-        api.ensureLogin()
+        return try {
+            api.ensureLogin()
 
-        var streamUrl = ref.url
-        var packaging = ref.packaging ?: "DASH"
-        var drm = ref.drm ?: "WV"
+            var streamUrl = ref.url
+            var packaging = ref.packaging ?: "DASH"
+            var drm = ref.drm ?: "WV"
 
-        if (streamUrl.isNullOrBlank()) {
-            val content = api.content(ref.cid) ?: return false
-            val delivery = contentDelivery(content) ?: return false
-            streamUrl = delivery.first
-            packaging = delivery.second
-            drm = delivery.third
-        }
+            if (streamUrl.isNullOrBlank()) {
+                val content = api.content(ref.cid) ?: return false
+                val delivery = contentDelivery(content) ?: return false
+                streamUrl = delivery.first
+                packaging = delivery.second
+                drm = delivery.third
+            }
 
-        if (drm == "CLEAR") {
-            val stream = api.playableUrl(streamUrl, packaging, "CLEAR") ?: return false
+            if (drm == "CLEAR") {
+                val stream = api.playableUrl(streamUrl, packaging, "CLEAR") ?: return false
+                callback.invoke(
+                    newExtractorLink(name, name, stream) {
+                        this.quality = Qualities.Unknown.value
+                        this.type = if (packaging == "HLS") ExtractorLinkType.M3U8 else ExtractorLinkType.DASH
+                        this.headers = mapOf("User-Agent" to USER_AGENT)
+                    }
+                )
+                return true
+            }
+
+            api.ensureProvisioned()
+            val stream = api.playableUrl(streamUrl, packaging, drm)
+            if (stream.isNullOrBlank()) {
+                Log.e("IzziGo", "playableUrl returned null for $streamUrl ($packaging/$drm)")
+                return false
+            }
+            val license = api.licenseUrl(streamUrl, packaging, drm)
+            if (license.isNullOrBlank()) {
+                Log.e("IzziGo", "licenseUrl returned null for $streamUrl ($packaging/$drm)")
+                return false
+            }
+            Log.d("IzziGo", "emitting DRM link stream=$stream licenseHost=${license.substringBefore('?')}")
+
             callback.invoke(
-                newExtractorLink(name, name, stream) {
+                newDrmExtractorLink(name, name, stream, ExtractorLinkType.DASH, WIDEVINE_UUID) {
+                    this.licenseUrl = license
                     this.quality = Qualities.Unknown.value
-                    this.type = if (packaging == "HLS") ExtractorLinkType.M3U8 else ExtractorLinkType.DASH
-                    this.headers = mapOf("User-Agent" to USER_AGENT)
+                    this.referer = "$mainUrl/"
+                    this.headers = mapOf(
+                        "User-Agent" to USER_AGENT,
+                        "Origin" to mainUrl,
+                        "Referer" to "$mainUrl/",
+                    )
                 }
             )
-            return true
+            true
+        } catch (e: Exception) {
+            Log.e("IzziGo", "loadLinks failed: ${e.javaClass.simpleName}: ${e.message}")
+            false
         }
-
-        api.ensureProvisioned()
-        val stream = api.playableUrl(streamUrl, packaging, drm) ?: return false
-        val license = api.licenseUrl(streamUrl, packaging, drm) ?: return false
-
-        callback.invoke(
-            newDrmExtractorLink(name, name, stream, ExtractorLinkType.DASH, WIDEVINE_UUID) {
-                this.licenseUrl = license
-                this.quality = Qualities.Unknown.value
-                this.referer = "$mainUrl/"
-                this.headers = mapOf(
-                    "User-Agent" to USER_AGENT,
-                    "Origin" to mainUrl,
-                    "Referer" to "$mainUrl/",
-                )
-            }
-        )
-        return true
     }
 
     private fun JsonNode?.nodeList(): List<JsonNode> {

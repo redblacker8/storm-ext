@@ -329,25 +329,67 @@ class IzziGoApi(private val prefs: SharedPreferences) {
     suspend fun ensureProvisioned() {
         if (!provisioningData.isNullOrBlank()) return
         ensureLogin()
-        val json = mapper.readTree(
-            app.post(
-                "$mainUrl/managetv/core/device/ott/provision",
-                headers = headers(),
-                data = mapOf(
-                    "identityToken" to token.orEmpty(),
-                    "hid" to hwId,
-                    "drm" to "WV",
-                    "sys" to "PC",
-                    "label" to "CloudStream",
-                ),
-            ).text
-        )
-        val pd = json["provisioningData"]?.asText()
-        if (pd.isNullOrBlank()) {
-            throw ErrorLoadingException("izzi go: no se pudo provisionar el dispositivo")
+        val identityToken = token.orEmpty()
+
+        // Reuse an already provisioned device for this hardware id.
+        existingProvisioningData(identityToken)?.takeIf { it.isNotBlank() }?.let {
+            provisioningData = it
+            return
         }
-        provisioningData = pd
-        prefs.edit { putString(KEY_DID, json["did"]?.asText()) }
+
+        // Provision a new device.
+        provisionDevice(
+            "/managetv/core/device/ott/provision",
+            mapOf(
+                "identityToken" to identityToken,
+                "hid" to hwId,
+                "drm" to "WV",
+                "sys" to "PC",
+                "label" to "CloudStream",
+            ),
+        )?.takeIf { it.isNotBlank() }?.let {
+            provisioningData = it
+            return
+        }
+
+        // Already provisioned but the data was not returned -> refresh it.
+        provisionDevice(
+            "/managetv/core/device/ott/updateprovision",
+            mapOf(
+                "identityToken" to identityToken,
+                "hid" to hwId,
+                "drm" to "WV",
+                "sys" to "PC",
+            ),
+        )?.takeIf { it.isNotBlank() }?.let {
+            provisioningData = it
+            return
+        }
+
+        throw ErrorLoadingException("izzi go: no se pudo provisionar el dispositivo")
+    }
+
+    private suspend fun existingProvisioningData(identityToken: String): String? {
+        return try {
+            val json = getJson("/managetv/core/device/ott", mapOf("identityToken" to identityToken))
+            json["dev"]
+                ?.firstOrNull { it["hardwareId"]?.asText() == hwId }
+                ?.get("provisioningData")?.asText()
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private suspend fun provisionDevice(path: String, data: Map<String, String>): String? {
+        val json = mapper.readTree(
+            app.post("$mainUrl$path", headers = headers(), data = data).text
+        )
+        android.util.Log.d(
+            "IzziGo",
+            "provision $path -> err=${json["err"]?.asInt()} mes=${json["mes"]?.asText()} " +
+                "did=${json["did"]?.asText()} hasData=${!json["provisioningData"]?.asText().isNullOrBlank()}",
+        )
+        return json["provisioningData"]?.asText()
     }
 
     suspend fun playableUrl(url: String, packaging: String, drm: String): String? {
