@@ -8,7 +8,7 @@ import com.lagradost.cloudstream3.utils.loadExtractor
 import org.jsoup.nodes.Element
 
 class Pelisplus4KProvider : MainAPI() {
-    override var mainUrl = "https://ww3.pelisplus.to"
+    override var mainUrl = "https://tioplus.app"
     override var name = "Pelisplus4K"
     override var lang = "mx"
     override val hasMainPage = true
