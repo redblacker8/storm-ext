@@ -8,6 +8,7 @@ import com.lagradost.cloudstream3.HomePageList
 import com.lagradost.cloudstream3.HomePageResponse
 import com.lagradost.cloudstream3.LoadResponse
 import com.lagradost.cloudstream3.MainAPI
+import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.MainPageData
 import com.lagradost.cloudstream3.MainPageRequest
 import com.lagradost.cloudstream3.SearchResponse
@@ -123,6 +124,7 @@ class IzziGoProvider(private val api: IzziGoApi) : MainAPI() {
     }
 
     override val mainPage: List<MainPageData> = mainPageOf(
+        "recent" to "Recientes",
         "live" to "TV en vivo",
         "sports" to "Deportes",
         "news" to "Noticias",
@@ -132,21 +134,32 @@ class IzziGoProvider(private val api: IzziGoApi) : MainAPI() {
         "music" to "Música",
         "culture" to "Cultura",
         "entertainment" to "Entretenimiento",
+        "radio" to "Radio",
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
+        if (request.data == "recent") {
+            val items = api.recentChannels().map { refToSearch(it) }
+            return newHomePageResponse(listOf(HomePageList("Recientes", items, true)), false)
+        }
+
         api.ensureLogin()
         val channels = api.channels()
 
         if (request.data == "live") {
             val tv = channels.filter { it["sty"]?.asText() == "TV_CHANNEL" }
+            return newHomePageResponse(
+                listOf(HomePageList("Canales", tv.mapNotNull { channelToSearch(it) }, true)),
+                false,
+            )
+        }
+
+        if (request.data == "radio") {
             val radio = channels.filter { it["sty"]?.asText() == "RADIO_CHANNEL" }
-            val lists = mutableListOf<HomePageList>()
-            lists.add(HomePageList("Canales", tv.mapNotNull { channelToSearch(it) }, true))
-            if (radio.isNotEmpty()) {
-                lists.add(HomePageList("Radio", radio.mapNotNull { channelToSearch(it) }, true))
-            }
-            return newHomePageResponse(lists, false)
+            return newHomePageResponse(
+                listOf(HomePageList("Radio", radio.mapNotNull { channelToSearch(it) }, true)),
+                false,
+            )
         }
 
         val categoryName = liveCategories[request.data]
@@ -263,8 +276,12 @@ class IzziGoProvider(private val api: IzziGoApi) : MainAPI() {
 
             if (drm == "CLEAR") {
                 val stream = api.playableUrl(streamUrl, packaging, "CLEAR") ?: return false
+                val playUrl = api.nodeCorrectedStream(stream)?.also {
+                    Log.d("IzziGo", "CLEAR node fix $stream -> $it")
+                } ?: stream
+                recordRecent(ref)
                 callback.invoke(
-                    newExtractorLink(name, name, stream) {
+                    newExtractorLink(name, name, playUrl) {
                         this.quality = Qualities.Unknown.value
                         this.type = if (packaging == "HLS") ExtractorLinkType.M3U8 else ExtractorLinkType.DASH
                         this.headers = mapOf("User-Agent" to USER_AGENT)
@@ -279,15 +296,19 @@ class IzziGoProvider(private val api: IzziGoApi) : MainAPI() {
                 Log.e("IzziGo", "playableUrl returned null for $streamUrl ($packaging/$drm)")
                 return false
             }
+            val playUrl = api.nodeCorrectedStream(stream)?.also {
+                Log.d("IzziGo", "node fix $stream -> $it")
+            } ?: stream
             val license = api.licenseUrl(streamUrl, packaging, drm)
             if (license.isNullOrBlank()) {
                 Log.e("IzziGo", "licenseUrl returned null for $streamUrl ($packaging/$drm)")
                 return false
             }
-            Log.d("IzziGo", "emitting DRM link stream=$stream licenseHost=${license.substringBefore('?')}")
+            Log.d("IzziGo", "emitting DRM link stream=$playUrl licenseHost=${license.substringBefore('?')}")
 
+            recordRecent(ref)
             callback.invoke(
-                newDrmExtractorLink(name, name, stream, ExtractorLinkType.DASH, WIDEVINE_UUID) {
+                newDrmExtractorLink(name, name, playUrl, ExtractorLinkType.DASH, WIDEVINE_UUID) {
                     this.licenseUrl = license
                     this.quality = Qualities.Unknown.value
                     this.referer = "$mainUrl/"
@@ -368,6 +389,19 @@ class IzziGoProvider(private val api: IzziGoApi) : MainAPI() {
         ).toJson()
         return newLiveSearchResponse(title, ref, TvType.Live) {
             this.posterUrl = logo
+        }
+    }
+
+    private fun refToSearch(ref: IzziRef): SearchResponse =
+        newLiveSearchResponse(ref.title ?: "Canal", ref.toJson(), TvType.Live) {
+            this.posterUrl = ref.poster
+        }
+
+    /** Persists the channel in the recents list and refreshes the cached home page. */
+    private fun recordRecent(ref: IzziRef) {
+        if (ref.type != "CHANNEL") return
+        if (api.addRecentChannel(ref)) {
+            MainActivity.reloadHomeEvent.invoke(true)
         }
     }
 }

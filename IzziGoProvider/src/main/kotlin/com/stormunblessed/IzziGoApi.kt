@@ -6,6 +6,8 @@ import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.lagradost.cloudstream3.ErrorLoadingException
 import com.lagradost.cloudstream3.app
+import com.lagradost.cloudstream3.utils.AppUtils.toJson
+import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
 import java.net.URLEncoder
 import java.text.SimpleDateFormat
 import java.util.Calendar
@@ -20,6 +22,10 @@ class IzziGoApi(private val prefs: SharedPreferences) {
     private var channelsCacheTime = 0L
     private var categoryGenresCache: Map<String, String>? = null
     private var categoryGenresCacheTime = 0L
+    private var playableUrlsCache: List<JsonNode>? = null
+    private var playableUrlsCacheTime = 0L
+    private val genreIdsCache = mutableMapOf<String, List<String>>()
+    private var genreIdsCacheTime = 0L
 
     val mainUrl = "https://www.izzigo.tv"
     val appVersion = "11.6.22(0)_prd"
@@ -35,6 +41,8 @@ class IzziGoApi(private val prefs: SharedPreferences) {
         const val KEY_HW_ID = "hw_id"
         const val KEY_PROVISIONING = "provisioning_data"
         const val KEY_DID = "device_id"
+        const val KEY_RECENT = "recent_channels"
+        const val RECENT_LIMIT = 10
 
         private const val USER_AGENT =
             "Mozilla/5.0 (X11; Linux x86_64; rv:153.0) Gecko/20100101 Firefox/153.0"
@@ -172,6 +180,32 @@ class IzziGoApi(private val prefs: SharedPreferences) {
         }
     }
 
+    /** Recently played channels, most recent first. Persisted across restarts. */
+    fun recentChannels(): List<IzziRef> {
+        val raw = prefs.getString(KEY_RECENT, null) ?: return emptyList()
+        val arr = try {
+            mapper.readTree(raw)
+        } catch (e: Exception) {
+            return emptyList()
+        }
+        if (!arr.isArray) return emptyList()
+        return arr.mapNotNull { tryParseJson<IzziRef>(it.asText()) }
+    }
+
+    /** Returns true when the stored recent list actually changed. */
+    fun addRecentChannel(ref: IzziRef): Boolean {
+        if (ref.type != "CHANNEL") return false
+        val current = recentChannels()
+        val updated = (
+            listOf(ref) + current.filterNot { it.cid == ref.cid && it.type == ref.type }
+            ).take(RECENT_LIMIT)
+        if (updated.map { it.cid } == current.map { it.cid }) return false
+        val arr = mapper.createArrayNode()
+        updated.forEach { arr.add(it.toJson()) }
+        prefs.edit { putString(KEY_RECENT, arr.toString()) }
+        return true
+    }
+
     private fun baseParams(): MutableMap<String, String> = mutableMapOf(
         "language" to language,
         "region" to region,
@@ -229,6 +263,12 @@ class IzziGoApi(private val prefs: SharedPreferences) {
 
     /** Service ids of the channels currently airing content of the given genre gids. */
     suspend fun channelIdsByGenre(genre: String): List<String> {
+        val now = System.currentTimeMillis()
+        if (now - genreIdsCacheTime > 5 * 60 * 1000L) {
+            genreIdsCache.clear()
+            genreIdsCacheTime = now
+        }
+        genreIdsCache[genre]?.let { return it }
         ensureLogin()
         val json = getJson(
             "/managetv/tvinfo/events/filter",
@@ -248,7 +288,9 @@ class IzziGoApi(private val prefs: SharedPreferences) {
                 "genre" to genre,
             ),
         )
-        return json["evs"]?.mapNotNull { it["sid"]?.asText() }?.distinct() ?: emptyList()
+        val ids = json["evs"]?.mapNotNull { it["sid"]?.asText() }?.distinct() ?: emptyList()
+        genreIdsCache[genre] = ids
+        return ids
     }
 
     private fun isoNow(plusMinutes: Int): String {
@@ -405,6 +447,69 @@ class IzziGoApi(private val prefs: SharedPreferences) {
         val json = getJson("/streamlocators/multirights/getPlayableUrlAndLicense", params)
         if (json["allowed"]?.asBoolean(false) != true) return null
         return json["videos"]?.firstOrNull()?.get("url")?.asText()
+    }
+
+    private val nodeRegex = Regex("^https://live1-ott\\.izzigo\\.tv/\\d+/")
+
+    /** All live stream locators/urls (public endpoint, no per-content license check). */
+    suspend fun playableUrls(): List<JsonNode> {
+        val now = System.currentTimeMillis()
+        playableUrlsCache?.let { if (now - playableUrlsCacheTime < 10 * 60 * 1000L) return it }
+        ensureLogin()
+        val json = getJson(
+            "/streamlocators/getPlayableUrls",
+            baseParams() + mapOf(
+                "packaging" to "DASH",
+                "drm" to "WV",
+                "deviceType" to "PC",
+                "deviceClass" to "PC",
+            ),
+        )
+        val list = json["urls"]?.toList() ?: emptyList()
+        playableUrlsCache = list
+        playableUrlsCacheTime = now
+        return list
+    }
+
+    private fun streamName(url: String): String? {
+        val marker = "/out/u/dash/"
+        val idx = url.indexOf(marker)
+        if (idx < 0) return null
+        val rest = url.substring(idx + marker.length)
+        val end = rest.lastIndexOf('/')
+        return if (end > 0) rest.substring(0, end) else null
+    }
+
+    private suspend fun isReachable(url: String): Boolean {
+        return try {
+            app.get(url, headers = headers(auth = false)).isSuccessful
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /**
+     * Some channel locators resolve to a `live1-ott.izzigo.tv` url without the CDN node
+     * segment (e.g. `.../ESPN-HD/default.mpd` instead of `.../11/ESPN-HD/default.mpd`),
+     * which the CDN answers with 403. The node-corrected url exists under another locator
+     * for the very same stream name, so look it up in the bulk playable list.
+     */
+    suspend fun nodeCorrectedStream(streamUrl: String): String? {
+        if (!streamUrl.startsWith("https://live1-ott.izzigo.tv/")) return null
+        if (nodeRegex.containsMatchIn(streamUrl)) return null
+        val name = streamName(streamUrl) ?: return null
+        val urls = try {
+            playableUrls()
+        } catch (e: Exception) {
+            return null
+        }
+        for (candidate in urls) {
+            val candidateUrl = candidate["url"]?.asText() ?: continue
+            if (streamName(candidateUrl) != name) continue
+            if (!nodeRegex.containsMatchIn(candidateUrl)) continue
+            if (isReachable(candidateUrl)) return candidateUrl
+        }
+        return null
     }
 
     private suspend fun renewAuthorization(renewAuth: String): String? {
