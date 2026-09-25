@@ -449,7 +449,8 @@ class IzziGoApi(private val prefs: SharedPreferences) {
         return json["videos"]?.firstOrNull()?.get("url")?.asText()
     }
 
-    private val nodeRegex = Regex("^https://live1-ott\\.izzigo\\.tv/\\d+/")
+    private val reachableCache = mutableMapOf<String, Boolean>()
+    private var reachableCacheTime = 0L
 
     /** All live stream locators/urls (public endpoint, no per-content license check). */
     suspend fun playableUrls(): List<JsonNode> {
@@ -481,23 +482,32 @@ class IzziGoApi(private val prefs: SharedPreferences) {
     }
 
     private suspend fun isReachable(url: String): Boolean {
-        return try {
+        val now = System.currentTimeMillis()
+        if (now - reachableCacheTime > 5 * 60 * 1000L) {
+            reachableCache.clear()
+            reachableCacheTime = now
+        }
+        reachableCache[url]?.let { return it }
+        val ok = try {
             app.get(url, headers = headers(auth = false)).isSuccessful
         } catch (e: Exception) {
             false
         }
+        reachableCache[url] = ok
+        return ok
     }
 
     /**
-     * Some channel locators resolve to a `live1-ott.izzigo.tv` url without the CDN node
-     * segment (e.g. `.../ESPN-HD/default.mpd` instead of `.../11/ESPN-HD/default.mpd`),
-     * which the CDN answers with 403. The node-corrected url exists under another locator
-     * for the very same stream name, so look it up in the bulk playable list.
+     * Some channel locators resolve to a broken `live1-ott.izzigo.tv` url (either no CDN
+     * node segment at all, e.g. `.../ESPN-HD/default.mpd`, or a dead node such as
+     * `.../3/.../DISCOVERY-HOME-AND-HEALTH-HD/default.mpd`) which the CDN answers with 403.
+     * The same stream name usually exists under another locator with a working node, so
+     * probe the bulk playable list and use the first reachable url.
      */
     suspend fun nodeCorrectedStream(streamUrl: String): String? {
         if (!streamUrl.startsWith("https://live1-ott.izzigo.tv/")) return null
-        if (nodeRegex.containsMatchIn(streamUrl)) return null
         val name = streamName(streamUrl) ?: return null
+        if (isReachable(streamUrl)) return null
         val urls = try {
             playableUrls()
         } catch (e: Exception) {
@@ -505,8 +515,9 @@ class IzziGoApi(private val prefs: SharedPreferences) {
         }
         for (candidate in urls) {
             val candidateUrl = candidate["url"]?.asText() ?: continue
+            if (candidateUrl == streamUrl) continue
+            if (!candidateUrl.startsWith("https://live1-ott.izzigo.tv/")) continue
             if (streamName(candidateUrl) != name) continue
-            if (!nodeRegex.containsMatchIn(candidateUrl)) continue
             if (isReachable(candidateUrl)) return candidateUrl
         }
         return null

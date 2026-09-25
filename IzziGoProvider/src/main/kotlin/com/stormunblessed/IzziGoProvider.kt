@@ -27,11 +27,14 @@ import com.lagradost.cloudstream3.newTvSeriesSearchResponse
 import com.lagradost.cloudstream3.toNewSearchResponseList
 import com.lagradost.cloudstream3.utils.AppUtils.toJson
 import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
+import com.lagradost.cloudstream3.utils.DrmExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newDrmExtractorLink
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import kotlinx.coroutines.runBlocking
+import okhttp3.Interceptor
 import java.util.UUID
 
 data class IzziRef(
@@ -42,6 +45,12 @@ data class IzziRef(
     val drm: String? = null,
     val title: String? = null,
     val poster: String? = null,
+)
+
+data class IzziDrmData(
+    val streamUrl: String,
+    val packaging: String,
+    val drm: String,
 )
 
 class IzziGoProvider(private val api: IzziGoApi) : MainAPI() {
@@ -63,6 +72,7 @@ class IzziGoProvider(private val api: IzziGoApi) : MainAPI() {
         private val WIDEVINE_UUID: UUID = UUID.fromString("edef8ba9-79d6-4ace-a3c8-27dcd51d21ed")
         private const val PAGE_SIZE = 40
         private const val VIEW = "stb_contents_list_view"
+        private const val LICENSE_PLACEHOLDER = "https://license.izzigo.invalid/"
         private const val USER_AGENT =
             "Mozilla/5.0 (X11; Linux x86_64; rv:153.0) Gecko/20100101 Firefox/153.0"
     }
@@ -299,17 +309,13 @@ class IzziGoProvider(private val api: IzziGoApi) : MainAPI() {
             val playUrl = api.nodeCorrectedStream(stream)?.also {
                 Log.d("IzziGo", "node fix $stream -> $it")
             } ?: stream
-            val license = api.licenseUrl(streamUrl, packaging, drm)
-            if (license.isNullOrBlank()) {
-                Log.e("IzziGo", "licenseUrl returned null for $streamUrl ($packaging/$drm)")
-                return false
-            }
-            Log.d("IzziGo", "emitting DRM link stream=$playUrl licenseHost=${license.substringBefore('?')}")
+            Log.d("IzziGo", "emitting DRM link stream=$playUrl (license resolved lazily)")
 
             recordRecent(ref)
             callback.invoke(
                 newDrmExtractorLink(name, name, playUrl, ExtractorLinkType.DASH, WIDEVINE_UUID) {
-                    this.licenseUrl = license
+                    this.licenseUrl = LICENSE_PLACEHOLDER
+                    this.extractorData = IzziDrmData(streamUrl, packaging, drm).toJson()
                     this.quality = Qualities.Unknown.value
                     this.referer = "$mainUrl/"
                     this.headers = mapOf(
@@ -323,6 +329,30 @@ class IzziGoProvider(private val api: IzziGoApi) : MainAPI() {
         } catch (e: Exception) {
             Log.e("IzziGo", "loadLinks failed: ${e.javaClass.simpleName}: ${e.message}")
             false
+        }
+    }
+
+    override fun getVideoInterceptor(extractorLink: ExtractorLink): Interceptor? {
+        if (extractorLink !is DrmExtractorLink) return null
+        val data = extractorLink.extractorData ?: return null
+        val drmData = tryParseJson<IzziDrmData>(data) ?: return null
+        return Interceptor { chain ->
+            val request = chain.request()
+            if (!request.method.equals("POST", ignoreCase = true)) {
+                return@Interceptor chain.proceed(request)
+            }
+            val fresh = try {
+                runBlocking { api.licenseUrl(drmData.streamUrl, drmData.packaging, drmData.drm) }
+            } catch (e: Exception) {
+                Log.e("IzziGo", "license refresh failed: ${e.javaClass.simpleName}: ${e.message}")
+                null
+            }
+            if (fresh.isNullOrBlank()) {
+                Log.e("IzziGo", "license refresh returned null, keeping original request")
+                return@Interceptor chain.proceed(request)
+            }
+            Log.d("IzziGo", "refreshed DRM license -> ${fresh.substringBefore('?')}")
+            chain.proceed(request.newBuilder().url(fresh).build())
         }
     }
 
