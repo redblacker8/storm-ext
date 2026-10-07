@@ -3,9 +3,8 @@ package com.lagradost.cloudstream3.movieproviders
 import android.webkit.URLUtil
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.loadExtractor
 import com.stormunblessed.Embed69Extractor
-import com.stormunblessed.fixHostsLinks
+import com.stormunblessed.loadSourceNameExtractor
 import org.jsoup.nodes.Element
 
 class PelisplusHDProvider : MainAPI() {
@@ -150,16 +149,17 @@ class PelisplusHDProvider : MainAPI() {
                             val regex = """(go_to_player|go_to_playerVast)\('(.*?)'""".toRegex()
                             regex.findAll(app.get(it).document.html()).map { it.groupValues.get(2) }
                                 .toList().amap {
-                                    loadExtractor(
-                                        fixHostsLinks(it),
+                                    loadSourceNameExtractor(
+                                        lang,
+                                        it,
                                         data,
                                         subtitleCallback,
                                         callback
                                     )
                                 }
                         } else { // https://xupalace.org/uqlink.php or others
-                            app.get(it).document.selectFirst("iframe")?.attr("src")?.let {
-                                loadExtractor(fixHostsLinks(it), data, subtitleCallback, callback)
+                            app.get(it).document.selectFirst("iframe")?.attr("src")?.let { src ->
+                                loadSourceNameExtractor(lang, src, data, subtitleCallback, callback)
                             }
                         }
 

@@ -4,10 +4,9 @@ import android.util.Log
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.network.CloudflareKiller
 import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.nicehttp.NiceResponse
 import com.stormunblessed.Embed69Extractor
-import com.stormunblessed.fixHostsLinks
+import com.stormunblessed.loadSourceNameExtractor
 import org.jsoup.nodes.Element
 
 class EntrepeliculasyseriesProvider : MainAPI() {
@@ -140,12 +139,12 @@ class EntrepeliculasyseriesProvider : MainAPI() {
                         val regex = """(go_to_player|go_to_playerVast)\('(.*?)'""".toRegex()
                         regex.findAll(app.get(embedUrl).document.html()).map { it.groupValues.get(2) }
                             .toList().amap {
-                                loadExtractor(fixHostsLinks(it), data, subtitleCallback, callback)
+                                loadSourceNameExtractor(lang, it, data, subtitleCallback, callback)
                             }
                     }
                     else -> {
-                        app.get(embedUrl).document.selectFirst("iframe")?.attr("src")?.let {
-                            loadExtractor(fixHostsLinks(it), data, subtitleCallback, callback)
+                        app.get(embedUrl).document.selectFirst("iframe")?.attr("src")?.let { src ->
+                            loadSourceNameExtractor(lang, src, data, subtitleCallback, callback)
                         }
                     }
                 }

@@ -2,9 +2,9 @@ package com.stormunblessed
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import org.jsoup.nodes.Element
+import org.jsoup.select.Elements
 
 
 class SoloLatinoProvider : MainAPI() {
@@ -140,33 +140,49 @@ class SoloLatinoProvider : MainAPI() {
             "X-CSRF-TOKEN" to csrf,
             "Accept" to "application/json",
         )
-        doc.select("button.server-btn").amap { btn ->
-            val token = btn.attr("data-player-token")
-            if (token.isNotBlank()) {
-                val response = app.post(
-                    "$mainUrl/api/player-url",
-                    headers = headers,
-                    data = mapOf("t" to token)
-                ).parsedSafe<PlayerResponse>()
-                response?.let { resolved ->
-                    val url = resolved.url
-                    when {
-                        resolved.type == "mp4" -> callback.invoke(
-                            newExtractorLink("SoloLatino", "SoloLatino", url)
-                        )
-                        url.startsWith("https://embed69.org/") -> {
-                            Embed69Extractor.load(url, data, subtitleCallback, callback)
-                        }
-                        url.startsWith("https://xupalace.org/video") -> {
-                            val regex = """(go_to_player|go_to_playerVast)\('(.*?)'""".toRegex()
-                            regex.findAll(app.get(url).document.html()).map { it.groupValues[2] }
-                                .toList().amap {
-                                    loadExtractor(fixHostsLinks(it), data, subtitleCallback, callback)
+        // Language groups ("mx" -> Latino) each hold their own server buttons
+        val langGroups: List<Pair<String, Elements>> = doc.select("div[data-lang-group]")
+            .mapNotNull { group ->
+                val buttons = group.select("button.server-btn")
+                if (buttons.isEmpty()) null else group.attr("data-lang-group") to buttons
+            }
+            .takeIf { it.isNotEmpty() }
+            ?: listOf(lang to doc.select("button.server-btn"))
+
+        langGroups.forEach { (groupLang, buttons) ->
+            buttons.amap { btn ->
+                val serverName = btn.text()
+                val token = btn.attr("data-player-token")
+                if (token.isNotBlank()) {
+                    val response = app.post(
+                        "$mainUrl/api/player-url",
+                        headers = headers,
+                        data = mapOf("t" to token)
+                    ).parsedSafe<PlayerResponse>()
+                    response?.let { resolved ->
+                        val url = resolved.url
+                        when {
+                            resolved.type == "mp4" -> callback.invoke(
+                                newExtractorLink(
+                                    normalizeSourceServer(serverName),
+                                    standardSourceName(groupLang, serverName),
+                                    url
+                                )
+                            )
+                            url.startsWith("https://embed69.org/") -> {
+                                Embed69Extractor.load(url, data, subtitleCallback, callback)
+                            }
+                            url.startsWith("https://xupalace.org/video") -> {
+                                val regex = """(go_to_player|go_to_playerVast)\('(.*?)'""".toRegex()
+                                regex.findAll(app.get(url).document.html()).map { it.groupValues[2] }
+                                    .toList().amap {
+                                        loadSourceNameExtractor(groupLang, it, data, subtitleCallback, callback)
+                                    }
+                            }
+                            else -> {
+                                app.get(url).document.selectFirst("iframe")?.attr("src")?.let {
+                                    loadSourceNameExtractor(groupLang, it, data, subtitleCallback, callback)
                                 }
-                        }
-                        else -> {
-                            app.get(url).document.selectFirst("iframe")?.attr("src")?.let {
-                                loadExtractor(fixHostsLinks(it), data, subtitleCallback, callback)
                             }
                         }
                     }
