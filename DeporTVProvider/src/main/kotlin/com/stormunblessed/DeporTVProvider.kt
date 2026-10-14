@@ -98,6 +98,17 @@ data class StreamTPResponse(
     val events: List<StreamTPEvent>?
 )
 
+// New STP agenda format served by /events.json (e.g. streamtp-golden1.click)
+data class StreamTPEventInfo(
+    val title: String?,
+    val category: String?,
+    val time: String?,
+    val url: String?,
+    val quality: String?,
+    val clase: String?,
+    val status: String?
+)
+
 data class Site(
     val key: SiteKey,
     val mainUrl: String,
@@ -221,23 +232,23 @@ class DeporTVProvider : MainAPI() {
         listOf(
             Site(
                 SiteKey.RUSTICO,
-                "https://rusticotv.su",
+                "https://rusticotv.la", // -> rusticotvplus.org
                 "/agenda.php"
             ),
             Site(
                 SiteKey.STREAMXX,
-                "https://streamx996.one", // https://streamx488.sbs
-                "/json/agenda550.json?nocache=${Date().time}",
+                "https://streamx061.sbs",
+                "/agenda.html",
             ),
             Site(
                 SiteKey.STREAMXHD,
-                "https://streamx-hd.com",
+                "https://streamxhd.com",
                 "/eventos.json?v=${Date().time}",
             ),
             Site(
                 SiteKey.STP,
-                "https://streamtp99a.sbs",
-                "/eventos.json?nocache=${Date().time}"
+                "https://streamtp-golden1.click",
+                "/events.json?nocache=${Date().time}"
             ),
             Site(
                 SiteKey.LA18HD,
@@ -246,8 +257,8 @@ class DeporTVProvider : MainAPI() {
             ),
             Site(
                 SiteKey.FUTBOLLIBRE,
-                "https://futbollibres.org.pe",
-                "/agenda-data.php"
+                "https://futbollibrelive.pe",
+                "https://api.wqxag.com/diaries.json"
             ),
             // BROKEN SITES
             // TODO: fix old events
@@ -267,11 +278,11 @@ class DeporTVProvider : MainAPI() {
             //     "https://streamtpday1.xyz",
             //     "/wc.json?_=${Date().time}"
             // ),
-            // Site(
-            //     SiteKey.CANALESDEPORTIVOS,
-            //     "https://canalesdeportivos.net",
-            //     "https://canalesdeportivos.net/partidos.json?v=${Date().time}"
-            // ),
+            Site(
+                SiteKey.CANALESDEPORTIVOS,
+                "https://elcanaldeportivo.org",
+                "https://elcanaldeportivo.org/partidos.json?v=${Date().time}"
+            ),
         )
     override var name = "DeporTV"
     override var lang = "mx"
@@ -345,10 +356,7 @@ class DeporTVProvider : MainAPI() {
                                     )
                                 )
                             } ?: emptyList()
-                    } else if (it.key.equals(SiteKey.LA18HD)
-                        || it.key.equals(SiteKey.STREAMXX)
-                        || it.key.equals(SiteKey.STP)
-                    ) {
+                    } else if (it.key.equals(SiteKey.LA18HD)) {
                         events = AppUtils.tryParseJson<List<La14HDMatchInfo>>(res.text)
                             ?.map {
                                 val matchId = streamedInfo.searchPosterByTitle(it.title)
@@ -356,6 +364,20 @@ class DeporTVProvider : MainAPI() {
                                     matchId.title,
                                     matchId.hour ?: transformHourToLocal(it.time, "GMT-5"),
                                     listOf(it.link),
+                                    matchId.poster
+                                )
+                            } ?: emptyList()
+                    } else if (it.key.equals(SiteKey.STP)) {
+                        // New STP agenda format: /events.json (title/category/time/url/quality/clase/status)
+                        events = AppUtils.tryParseJson<List<StreamTPEventInfo>>(res.text)
+                            ?.mapNotNull { event ->
+                                val title = event.title ?: return@mapNotNull null
+                                val link = event.url ?: return@mapNotNull null
+                                val matchId = streamedInfo.searchPosterByTitle(title)
+                                EventData(
+                                    matchId.title,
+                                    matchId.hour ?: transformHourToLocal(event.time ?: "00:00", "GMT-5"),
+                                    listOf(link),
                                     matchId.poster
                                 )
                             } ?: emptyList()
@@ -948,7 +970,10 @@ class DeporTVProvider : MainAPI() {
                         }
 
                     }
-                } else if (frame.startsWith("https://canalesdeportivos.net/ver/") || frame.startsWith("https://elcanaldeportivo.com/ver/")) {
+                } else if (frame.startsWith("https://canalesdeportivos.net/ver/")
+                    || frame.startsWith("https://elcanaldeportivo.com/ver/")
+                    || frame.startsWith("https://elcanaldeportivo.org/ver/")
+                ) {
                     val name = frame.substringAfterLast("/").substringBefore(".php")
                     val doc = app.get(frame).document
                     val iframeSrc = doc.selectFirst("iframe")?.attr("src")
