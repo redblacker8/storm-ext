@@ -119,8 +119,11 @@ class CinecalidadProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        app.get(data).document.select(".linklist ul li").amap {
-            val url = it.select("li").attr("data-option")
+        app.get(data).document.select(".linklist ul li[data-option]").amap {
+            // Skip the trailer option, which points to a YouTube video
+            if (it.hasClass("dooplay_player_option_trailer")) return@amap
+            val url = it.attr("data-option")
+            if (url.isBlank() || url.contains("youtube.com") || url.contains("youtu.be")) return@amap
             loadExtractor(fixHostsLinks(url), mainUrl, subtitleCallback, callback)
         }
         return true
