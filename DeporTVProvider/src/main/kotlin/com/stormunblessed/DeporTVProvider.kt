@@ -5,6 +5,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import com.lagradost.cloudstream3.utils.M3u8Helper
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -594,9 +595,134 @@ class DeporTVProvider : MainAPI() {
                         ).replaceFirst(
                             "https://latamx701.org/global1.php?stream=",
                             "https://streamtp-x-y-z.ws/global1.php?stream="
+                        ).replaceFirst(
+                            // STREAMXX agenda embeds a dead host; streamx741.com redirects to the live one
+                            "https://streamx061.sbs/global1.php",
+                            "https://streamx741.com/global1.php"
                         )
                 } else it
-                if (frame.contains("canales.php?stream=") || frame.contains("canal.php?stream=")) {
+                // latamzy.com / sudamericafy.com/global1.php only expose the real player
+                // through a JS-built iframe; resolve it and let the normal chain handle it.
+                if (frame.contains("latamzy.com") || frame.contains("sudamericafy.com")) {
+                    resolveEmbeddedIframe(frame)?.let { embedded ->
+                        if (embedded.isNotEmpty()) frame = embedded
+                    }
+                }
+                if (frame.contains("tv-90.com")) {
+                    // Bitmovin DASH + ClearKey; the page hides the .mpd and the key pair
+                    // inside a base64 script decoded with _p/_k (see loadTv90Drm)
+                    loadTv90Drm(frame, callback)
+                } else if (frame.contains("tvf90.com") || frame.contains("futbollibre.ch")) {
+                    // Fútbol Libre player: *.php?stream=X -> /5.php?stream=X -> var playbackURL = "...m3u8"
+                    val source = URL(frame).host
+                    val name =
+                        if (frame.contains("?stream=")) frame.substringAfter("?stream=")
+                        else frame.substringAfterLast("/").substringBefore(".")
+                    var playerUrl = frame
+                    var doc = app.get(frame, headers = mapOf("Sec-Fetch-Dest" to "iframe")).document
+                    var link = doc.select("script").mapNotNull { extractPlaybackUrlFromScript(it.data()) }
+                        .firstOrNull()
+                    if (link.isNullOrEmpty()) {
+                        val iframe = doc.selectFirst("iframe")?.attr("src")
+                        if (!iframe.isNullOrEmpty()) {
+                            playerUrl = if (iframe.startsWith("http")) iframe
+                            else "https://${URL(frame).host}$iframe"
+                            doc = app.get(
+                                playerUrl,
+                                referer = frame,
+                                headers = mapOf("Sec-Fetch-Dest" to "iframe")
+                            ).document
+                            link = doc.select("script").mapNotNull { extractPlaybackUrlFromScript(it.data()) }
+                                .firstOrNull()
+                        }
+                    }
+                    if (!link.isNullOrEmpty()) {
+                        callback(
+                            newExtractorLink(
+                                "${source}[$name]",
+                                "${source}[$name]",
+                                link,
+                            ) {
+                                this.quality = Qualities.Unknown.value
+                                this.referer = playerUrl
+                                this.headers = mapOf(
+                                    "Origin" to "https://${URL(playerUrl).host}",
+                                    "Referer" to playerUrl
+                                )
+                            }
+                        )
+                    }
+                } else if (frame.startsWith("https://xstream.st/")) {
+                    loadXStreamSt(frame, callback)
+                } else if (frame.startsWith("https://holdfold.net/")) {
+                    // holdfold player: window._econfig holds a custom-encoded JSON with stream_url
+                    val source = URL(frame).host
+                    val name = frame.substringAfterLast("/")
+                    val html = app.get(frame, headers = mapOf("Sec-Fetch-Dest" to "iframe")).text
+                    val config = Regex("""_econfig\s*=\s*'([^']+)'""").find(html)?.groupValues?.get(1)
+                    val link = config?.let { decodeHoldfoldConfig(it) }
+                    if (!link.isNullOrEmpty()) {
+                        callback(
+                            newExtractorLink(
+                                "${source}[$name]",
+                                "${source}[$name]",
+                                link,
+                            ) {
+                                this.quality = Qualities.Unknown.value
+                                this.referer = frame
+                            }
+                        )
+                    }
+                } else if (frame.startsWith("https://spf24live.st/")) {
+                    // RusticoTV channel page -> iframe pointing to a holdfold player
+                    val iframe = app.get(frame, headers = mapOf("Sec-Fetch-Dest" to "iframe"))
+                        .document.selectFirst("iframe")?.attr("src")
+                    if (!iframe.isNullOrEmpty()) {
+                        val embedUrl = if (iframe.startsWith("http")) iframe
+                        else "https://${URL(frame).host}$iframe"
+                        val html =
+                            app.get(embedUrl, referer = frame, headers = mapOf("Sec-Fetch-Dest" to "iframe")).text
+                        val config = Regex("""_econfig\s*=\s*'([^']+)'""").find(html)?.groupValues?.get(1)
+                        val link = config?.let { decodeHoldfoldConfig(it) }
+                        if (!link.isNullOrEmpty()) {
+                            val source = URL(embedUrl).host
+                            val name = URL(embedUrl).path.substringAfterLast("/")
+                            callback(
+                                newExtractorLink(
+                                    "${source}[$name]",
+                                    "${source}[$name]",
+                                    link,
+                                ) {
+                                    this.quality = Qualities.Unknown.value
+                                    this.referer = embedUrl
+                                }
+                            )
+                        }
+                    }
+                } else if (frame.startsWith("https://sudamericafy.com/")) {
+                    // Bitmovin DASH + ClearKey: the config (mpd + key pair) is built by an
+                    // obfuscated script, so we run it in Rhino and intercept .load({...})
+                    loadBitmovinClearKey(frame, callback)
+                } else if (frame.contains("latamzy.com")) {
+                    // latamzy.com only embeds another global1.php player; the final request is HLS
+                    val source = URL(frame).host
+                    val name = frame.substringAfter("?stream=")
+                    val wantM3u8 = Regex("""(m3u8|manifest)""")
+                    val resolver = WebViewResolver(
+                        interceptUrl = wantM3u8,
+                        additionalUrls = listOf(wantM3u8),
+                        useOkhttp = false,
+                        timeout = 15_000L
+                    )
+                    val intercepted = app.get(frame, interceptor = resolver).url
+                    if (intercepted.isNotEmpty()) {
+                        M3u8Helper.generateM3u8(
+                            "$source[$name]",
+                            intercepted,
+                            frame
+                        ).forEach(callback)
+                    }
+                } else if (frame.contains("canales.php?stream=") || frame.contains("canal.php?stream=")) {
                     val source = URL(frame).host
                     val name = frame.substringAfter("?stream=")
                     val iframeSrc = app.get(frame, referer = it).document.selectFirst("iframe")?.attr("src")
@@ -871,7 +997,7 @@ class DeporTVProvider : MainAPI() {
                     val source = URL(frame).host
                     var result = app.get(
                         frame,
-                        referer = "https://futbollibres.org.pe/"
+                        referer = "https://futbollibrelive.pe/"
                     ).document.select("script")
                         .first { it.data().contains("ConfiguracionCanales =") }?.data()
                         ?.substringAfter("ConfiguracionCanales = {")?.substringBefore("};")
@@ -1004,7 +1130,11 @@ class DeporTVProvider : MainAPI() {
                             if (directFrame != null) {
                                 val embedUrl = if (directFrame.startsWith("http")) directFrame
                                 else "https://${URL(resolvedUrl).host}$directFrame"
-                                loadExtractor(embedUrl, referer = resolvedUrl, subtitleCallback, callback)
+                                if (embedUrl.contains("xstream.st/")) {
+                                    loadXStreamSt(embedUrl, callback)
+                                } else {
+                                    loadExtractor(embedUrl, referer = resolvedUrl, subtitleCallback, callback)
+                                }
                             }
                         }
                     }
@@ -1024,6 +1154,494 @@ class DeporTVProvider : MainAPI() {
         val chars = Regex("\"([^\"]*)\"").findAll(arrayStr).map { it.groupValues[1] }.toList()
         val url = chars.joinToString("").replace("\\/", "/")
         return url.takeIf { it.startsWith("http") && it.contains(".m3u8") }
+    }
+
+    private fun extractPlaybackUrlFromScript(script: String): String? {
+        return Regex("""var\s+playbackURL\s*=\s*["']([^"']+)["']""")
+            .find(script)?.groupValues?.get(1)
+            ?.replace("\\/", "/")
+            ?.takeIf { it.startsWith("http") }
+    }
+
+    // holdfold.net obfuscates its _econfig: base64 -> 4 shuffled chunks (4th byte of each is a decoy)
+    // -> base64 again -> JSON with "stream_url". Mirrors /assets/stream.js decodeConfig().
+    private fun decodeHoldfoldConfig(config: String): String? {
+        return try {
+            val raw = String(Base64.decode(config, Base64.DEFAULT), Charsets.ISO_8859_1)
+            val quarter = raw.length / 4
+            if (quarter < 4) return null
+            val order = intArrayOf(2, 0, 3, 1)
+            val parts = arrayOfNulls<String>(4)
+            for (i in 0 until 4) {
+                val chunk = raw.substring(i * quarter, (i + 1) * quarter)
+                val cleaned = chunk.substring(0, 3) + chunk.substring(4)
+                parts[order[i]] = String(
+                    Base64.decode(cleaned.toByteArray(Charsets.ISO_8859_1), Base64.DEFAULT),
+                    Charsets.ISO_8859_1
+                )
+            }
+            val joined = parts.joinToString("") { it ?: "" }
+            val json = String(
+                Base64.decode(joined.toByteArray(Charsets.ISO_8859_1), Base64.DEFAULT),
+                Charsets.UTF_8
+            )
+            val parsed = AppUtils.tryParseJson<Map<String, Any?>>(json)
+            (parsed?.get("stream_url_nop2p") as? String)
+                ?: (parsed?.get("stream_url") as? String)
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    // CanalesDeportivos player (xstream.st): JW Player + SwarmCloud, sources in a streamUrls array
+    private suspend fun loadXStreamSt(frame: String, callback: (ExtractorLink) -> Unit) {
+        val source = URL(frame).host
+        val name =
+            if (frame.contains("?stream=")) frame.substringAfter("?stream=")
+            else frame.substringAfterLast("/").substringBefore(".")
+        val script = app.get(frame, headers = mapOf("Sec-Fetch-Dest" to "iframe"))
+            .document.select("script").map { it.data() }.joinToString("\n")
+        val link = Regex("""streamUrls\s*=\s*\[\s*"([^"]+)"""")
+            .find(script)?.groupValues?.get(1)
+            ?.replace("\\u0026", "&")?.replace("\\/", "/")
+        if (!link.isNullOrEmpty()) {
+            callback(
+                newExtractorLink(
+                    "$source[$name]",
+                    "$source[$name]",
+                    link,
+                ) {
+                    this.quality = Qualities.Unknown.value
+                    this.referer = frame
+                    this.headers = mapOf(
+                        "Origin" to "https://$source",
+                        "Referer" to frame
+                    )
+                }
+            )
+        }
+    }
+
+    // tv-90.com: Bitmovin DASH + ClearKey. The player config lives in a script
+    // obfuscated as _p (base64) with _k as the XOR seed:
+    //   var s = atob(_p), o = "";
+    //   for (n = 0; n < s.length; n++) o += String.fromCharCode((s.charCodeAt(n) ^ ((_k + n) & 255)) & 255);
+    //   eval(o);
+    // The decoded script exposes var u="...cenc.mpd", i="<keyId hex>", k="<key hex>".
+    private suspend fun loadTv90Drm(frame: String, callback: (ExtractorLink) -> Unit) {
+        val source = URL(frame).host
+        val name = frame.substringAfterLast("/").substringBefore(".")
+        try {
+            val html = app.get(frame, headers = mapOf("Sec-Fetch-Dest" to "iframe")).text
+            val encoded = Regex("""var _p="([^"]+)"""").find(html)?.groupValues?.get(1)
+            val seed = Regex("""_k=(\d+)""").find(html)?.groupValues?.get(1)?.toIntOrNull()
+            if (encoded.isNullOrEmpty() || seed == null) return
+
+            val decoded = String(Base64.decode(encoded, Base64.DEFAULT), Charsets.ISO_8859_1)
+            val script = buildString {
+                decoded.forEachIndexed { n, c ->
+                    append((((c.code xor ((seed + n) and 255)) and 255)).toChar())
+                }
+            }
+
+            val mpd = Regex("""var u="([^"]+)"""").find(script)?.groupValues?.get(1)
+                ?.replace("\\/", "/")
+            val keyIdHex = Regex(""",i="([0-9a-fA-F]+)"""").find(script)?.groupValues?.get(1)
+            val keyHex = Regex(""",k="([0-9a-fA-F]+)"""").find(script)?.groupValues?.get(1)
+            if (mpd.isNullOrEmpty() || keyIdHex.isNullOrEmpty() || keyHex.isNullOrEmpty()) return
+
+            val kid = Base64.encodeToString(
+                keyIdHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray(),
+                Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP
+            )
+            val key = Base64.encodeToString(
+                keyHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray(),
+                Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP
+            )
+            callback(
+                newDrmExtractorLink(
+                    "$source[$name]",
+                    "$source[$name]",
+                    mpd,
+                    ExtractorLinkType.DASH,
+                    CLEARKEY_UUID
+                ) {
+                    this.quality = Qualities.Unknown.value
+                    this.kid = kid
+                    this.key = key
+                    this.referer = frame
+                    this.headers = mapOf(
+                        "Origin" to "https://$source",
+                        "Referer" to frame
+                    )
+                }
+            )
+        } catch (_: Exception) {
+        }
+    }
+
+    // sudamericafy.com: Bitmovin DASH + ClearKey. The player config (dash url + clearkey
+    // pair) is built by a heavily obfuscated script, so we run it in Rhino with a mocked
+    // bitmovin.player.Player and capture the argument passed to .load({...}).
+    private suspend fun loadBitmovinClearKey(frame: String, callback: (ExtractorLink) -> Unit) {
+        val source = URL(frame).host
+        val name = frame.substringAfterLast("/").substringBefore(".")
+        try {
+            val scripts = app.get(frame, headers = mapOf("Sec-Fetch-Dest" to "iframe"))
+                .document.select("script").map { it.data() }.filter { it.isNotBlank() }
+            if (scripts.isEmpty()) return
+
+            var configJson: String? = null
+
+            val rhino = Context.enter()
+            rhino.setInterpretedMode(true)
+            val scope = rhino.initStandardObjects()
+            try {
+                scope.put("atob", scope, object : org.mozilla.javascript.BaseFunction() {
+                    override fun call(
+                        cx: org.mozilla.javascript.Context,
+                        s: org.mozilla.javascript.Scriptable,
+                        thisObj: org.mozilla.javascript.Scriptable,
+                        args: Array<out Any>
+                    ): Any = String(
+                        android.util.Base64.decode(args[0].toString(), Base64.DEFAULT),
+                        Charsets.UTF_8
+                    )
+                })
+
+                // bitmovin.player.Player(el, opts).load(config)
+                val playerCtor = object : org.mozilla.javascript.BaseFunction() {
+                    override fun call(
+                        cx: org.mozilla.javascript.Context,
+                        s: org.mozilla.javascript.Scriptable,
+                        thisObj: org.mozilla.javascript.Scriptable,
+                        args: Array<out Any>
+                    ): Any {
+                        val instance = cx.newObject(s, "Object")
+                        instance.put("load", instance, object : org.mozilla.javascript.BaseFunction() {
+                            override fun call(
+                                cx2: org.mozilla.javascript.Context,
+                                s2: org.mozilla.javascript.Scriptable,
+                                t2: org.mozilla.javascript.Scriptable,
+                                a2: Array<out Any>
+                            ): Any {
+                                val cfg = a2.getOrNull(0)
+                                if (cfg != null) {
+                                    configJson = try {
+                                        val jsonNs = s2.get("JSON", s2)
+                                        val stringify =
+                                            (jsonNs as? org.mozilla.javascript.Scriptable)
+                                                ?.get("stringify", jsonNs)
+                                        (stringify as? org.mozilla.javascript.Function)
+                                            ?.call(cx2, s2, s2, arrayOf(cfg))?.toString()
+                                    } catch (_: Exception) {
+                                        null
+                                    }
+                                }
+                                return instance
+                            }
+                        })
+                        return instance
+                    }
+                }
+                val playerNs = rhino.newObject(scope, "Object")
+                playerNs.put("Player", playerNs, playerCtor)
+                val bitmovin = rhino.newObject(scope, "Object")
+                bitmovin.put("player", bitmovin, playerNs)
+                scope.put("bitmovin", scope, bitmovin)
+
+                val fakeEl = rhino.newObject(scope, "Object")
+                val appendChild = object : org.mozilla.javascript.BaseFunction() {
+                    override fun call(
+                        cx: org.mozilla.javascript.Context,
+                        s: org.mozilla.javascript.Scriptable,
+                        thisObj: org.mozilla.javascript.Scriptable,
+                        args: Array<out Any>
+                    ): Any = org.mozilla.javascript.Undefined.instance
+                }
+                val fakeDoc = rhino.newObject(scope, "Object")
+                fakeDoc.put("getElementById", fakeDoc, object : org.mozilla.javascript.BaseFunction() {
+                    override fun call(
+                        cx: org.mozilla.javascript.Context,
+                        s: org.mozilla.javascript.Scriptable,
+                        thisObj: org.mozilla.javascript.Scriptable,
+                        args: Array<out Any>
+                    ): Any = fakeEl
+                })
+                fakeDoc.put("createElement", fakeDoc, object : org.mozilla.javascript.BaseFunction() {
+                    override fun call(
+                        cx: org.mozilla.javascript.Context,
+                        s: org.mozilla.javascript.Scriptable,
+                        thisObj: org.mozilla.javascript.Scriptable,
+                        args: Array<out Any>
+                    ): Any = cx.newObject(s, "Object")
+                })
+                fakeDoc.put("getElementsByTagName", fakeDoc, object : org.mozilla.javascript.BaseFunction() {
+                    override fun call(
+                        cx: org.mozilla.javascript.Context,
+                        s: org.mozilla.javascript.Scriptable,
+                        thisObj: org.mozilla.javascript.Scriptable,
+                        args: Array<out Any>
+                    ): Any = cx.newArray(s, arrayOf<Any>(cx.newObject(s, "Object")))
+                })
+                // Fire DOMContentLoaded listeners immediately: the player setup lives there.
+                fakeDoc.put("addEventListener", fakeDoc, object : org.mozilla.javascript.BaseFunction() {
+                    override fun call(
+                        cx: org.mozilla.javascript.Context,
+                        s: org.mozilla.javascript.Scriptable,
+                        thisObj: org.mozilla.javascript.Scriptable,
+                        args: Array<out Any>
+                    ): Any {
+                        val fn = args.getOrNull(1)
+                        if (fn is org.mozilla.javascript.Function) {
+                            try {
+                                fn.call(cx, s, s, emptyArray())
+                            } catch (_: Exception) {
+                            }
+                        }
+                        return org.mozilla.javascript.Undefined.instance
+                    }
+                })
+                val fakeHead = rhino.newObject(scope, "Object")
+                fakeHead.put("appendChild", fakeHead, appendChild)
+                fakeDoc.put("head", fakeDoc, fakeHead)
+                val fakeBody = rhino.newObject(scope, "Object")
+                fakeBody.put("appendChild", fakeBody, appendChild)
+                fakeDoc.put("body", fakeDoc, fakeBody)
+                scope.put("document", scope, fakeDoc)
+
+                val fakeWindow = rhino.newObject(scope, "Object")
+                fakeWindow.put("document", fakeWindow, fakeDoc)
+                scope.put("window", scope, fakeWindow)
+                scope.put("navigator", scope, rhino.newObject(scope, "Object"))
+                scope.put("location", scope, rhino.newObject(scope, "Object"))
+                scope.put("setTimeout", scope, object : org.mozilla.javascript.BaseFunction() {
+                    override fun call(
+                        cx: org.mozilla.javascript.Context,
+                        s: org.mozilla.javascript.Scriptable,
+                        thisObj: org.mozilla.javascript.Scriptable,
+                        args: Array<out Any>
+                    ): Any {
+                        val fn = args.getOrNull(0)
+                        if (fn is org.mozilla.javascript.Function) {
+                            try {
+                                fn.call(cx, s, s, emptyArray())
+                            } catch (_: Exception) {
+                            }
+                        }
+                        return 0.0
+                    }
+                })
+                scope.put("setInterval", scope, scope.get("setTimeout", scope))
+
+                val cleanScripts = scripts.joinToString("\n") { s ->
+                    s.replace(Regex("document\\.domain\\s*=.*?;"), "")
+                        .replace(Regex("window\\.location\\.(href|replace)\\s*=.*?;"), "")
+                }
+                rhino.evaluateString(scope, cleanScripts, "sudamericafy", 1, null)
+            } catch (_: Exception) {
+            } finally {
+                rhino.close()
+            }
+
+            val json = configJson ?: return
+            val mpd = Regex("""(https?://[^"]+\.mpd[^"]*)""").find(json)?.groupValues?.get(1)
+                ?.replace("\\/", "/")
+            val keyIdHex = Regex(""""(?i)keyId"\s*:\s*"([0-9a-fA-F]{32})"""")
+                .find(json)?.groupValues?.get(1)
+            val keyHex = Regex(""""(?i)key"\s*:\s*"([0-9a-fA-F]{32})"""")
+                .find(json)?.groupValues?.get(1)
+            if (mpd.isNullOrEmpty() || keyIdHex.isNullOrEmpty() || keyHex.isNullOrEmpty()) return
+
+            val kid = Base64.encodeToString(
+                keyIdHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray(),
+                Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP
+            )
+            val key = Base64.encodeToString(
+                keyHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray(),
+                Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP
+            )
+            callback(
+                newDrmExtractorLink(
+                    "$source[$name]",
+                    "$source[$name]",
+                    mpd,
+                    ExtractorLinkType.DASH,
+                    CLEARKEY_UUID
+                ) {
+                    this.quality = Qualities.Unknown.value
+                    this.kid = kid
+                    this.key = key
+                    this.referer = frame
+                    this.headers = mapOf(
+                        "Origin" to "https://$source",
+                        "Referer" to frame
+                    )
+                }
+            )
+        } catch (_: Exception) {
+        }
+    }
+
+    // Some player pages (latamzy.com, sudamericafy.com/global1.php, ...) only expose the
+    // real stream through a JS-built iframe. Run their scripts in Rhino and capture the
+    // src assigned to the created iframe.
+    private suspend fun resolveEmbeddedIframe(frame: String): String? {
+        return try {
+            val scripts = app.get(frame, headers = mapOf("Sec-Fetch-Dest" to "iframe"))
+                .document.select("script").map { it.data() }.filter { it.isNotBlank() }
+            if (scripts.isEmpty()) return null
+
+            var iframeEl: org.mozilla.javascript.Scriptable? = null
+            var captured: String? = null
+
+            val rhino = Context.enter()
+            rhino.setInterpretedMode(true)
+            val scope = rhino.initStandardObjects()
+            try {
+                scope.put("atob", scope, object : org.mozilla.javascript.BaseFunction() {
+                    override fun call(
+                        cx: org.mozilla.javascript.Context,
+                        s: org.mozilla.javascript.Scriptable,
+                        thisObj: org.mozilla.javascript.Scriptable,
+                        args: Array<out Any>
+                    ): Any = String(
+                        android.util.Base64.decode(args[0].toString(), Base64.DEFAULT),
+                        Charsets.UTF_8
+                    )
+                })
+
+                val appendChild = object : org.mozilla.javascript.BaseFunction() {
+                    override fun call(
+                        cx: org.mozilla.javascript.Context,
+                        s: org.mozilla.javascript.Scriptable,
+                        thisObj: org.mozilla.javascript.Scriptable,
+                        args: Array<out Any>
+                    ): Any = org.mozilla.javascript.Undefined.instance
+                }
+                val fakeEl = rhino.newObject(scope, "Object")
+                val fakeDoc = rhino.newObject(scope, "Object")
+                fakeDoc.put("createElement", fakeDoc, object : org.mozilla.javascript.BaseFunction() {
+                    override fun call(
+                        cx: org.mozilla.javascript.Context,
+                        s: org.mozilla.javascript.Scriptable,
+                        thisObj: org.mozilla.javascript.Scriptable,
+                        args: Array<out Any>
+                    ): Any {
+                        val el = cx.newObject(s, "Object")
+                        el.put("setAttribute", el, object : org.mozilla.javascript.BaseFunction() {
+                            override fun call(
+                                cx2: org.mozilla.javascript.Context,
+                                s2: org.mozilla.javascript.Scriptable,
+                                t2: org.mozilla.javascript.Scriptable,
+                                a2: Array<out Any>
+                            ): Any {
+                                val k = a2.getOrNull(0)?.toString()
+                                if (k != null) t2.put(k, t2, a2.getOrNull(1))
+                                return org.mozilla.javascript.Undefined.instance
+                            }
+                        })
+                        el.put("appendChild", el, appendChild)
+                        if ((args.getOrNull(0)?.toString() ?: "").equals("iframe", ignoreCase = true)) {
+                            iframeEl = el
+                        }
+                        return el
+                    }
+                })
+                fakeDoc.put("getElementById", fakeDoc, object : org.mozilla.javascript.BaseFunction() {
+                    override fun call(
+                        cx: org.mozilla.javascript.Context,
+                        s: org.mozilla.javascript.Scriptable,
+                        thisObj: org.mozilla.javascript.Scriptable,
+                        args: Array<out Any>
+                    ): Any = fakeEl
+                })
+                fakeDoc.put("getElementsByTagName", fakeDoc, object : org.mozilla.javascript.BaseFunction() {
+                    override fun call(
+                        cx: org.mozilla.javascript.Context,
+                        s: org.mozilla.javascript.Scriptable,
+                        thisObj: org.mozilla.javascript.Scriptable,
+                        args: Array<out Any>
+                    ): Any = cx.newArray(s, arrayOf<Any>(fakeEl))
+                })
+                fakeDoc.put("addEventListener", fakeDoc, object : org.mozilla.javascript.BaseFunction() {
+                    override fun call(
+                        cx: org.mozilla.javascript.Context,
+                        s: org.mozilla.javascript.Scriptable,
+                        thisObj: org.mozilla.javascript.Scriptable,
+                        args: Array<out Any>
+                    ): Any {
+                        val fn = args.getOrNull(1)
+                        if (fn is org.mozilla.javascript.Function) {
+                            try {
+                                fn.call(cx, s, s, emptyArray())
+                            } catch (_: Exception) {
+                            }
+                        }
+                        return org.mozilla.javascript.Undefined.instance
+                    }
+                })
+                val fakeHead = rhino.newObject(scope, "Object")
+                fakeHead.put("appendChild", fakeHead, appendChild)
+                fakeDoc.put("head", fakeDoc, fakeHead)
+                val fakeBody = rhino.newObject(scope, "Object")
+                fakeBody.put("appendChild", fakeBody, appendChild)
+                fakeDoc.put("body", fakeDoc, fakeBody)
+                fakeDoc.put("write", fakeDoc, appendChild)
+                scope.put("document", scope, fakeDoc)
+
+                val fakeWindow = rhino.newObject(scope, "Object")
+                fakeWindow.put("document", fakeWindow, fakeDoc)
+                scope.put("window", scope, fakeWindow)
+                scope.put("navigator", scope, rhino.newObject(scope, "Object"))
+                scope.put("location", scope, rhino.newObject(scope, "Object"))
+                scope.put("self", scope, scope)
+                scope.put("top", scope, scope)
+                scope.put("parent", scope, scope)
+                scope.put("setTimeout", scope, object : org.mozilla.javascript.BaseFunction() {
+                    override fun call(
+                        cx: org.mozilla.javascript.Context,
+                        s: org.mozilla.javascript.Scriptable,
+                        thisObj: org.mozilla.javascript.Scriptable,
+                        args: Array<out Any>
+                    ): Any {
+                        val fn = args.getOrNull(0)
+                        if (fn is org.mozilla.javascript.Function) {
+                            try {
+                                fn.call(cx, s, s, emptyArray())
+                            } catch (_: Exception) {
+                            }
+                        }
+                        return 0.0
+                    }
+                })
+                scope.put("setInterval", scope, scope.get("setTimeout", scope))
+
+                val cleanScripts = scripts.joinToString("\n") { s ->
+                    s.replace(Regex("document\\.domain\\s*=.*?;"), "")
+                        .replace(Regex("window\\.location\\.(href|replace)\\s*=.*?;"), "")
+                }
+                rhino.evaluateString(scope, cleanScripts, "iframe", 1, null)
+
+                iframeEl?.let { el ->
+                    captured = (el.get("src", el) ?: el.get("href", el))?.toString()
+                }
+            } catch (_: Exception) {
+            } finally {
+                rhino.close()
+            }
+
+            val raw = captured?.replace("\\/", "/")
+            when {
+                raw.isNullOrBlank() -> null
+                raw.startsWith("http") -> raw
+                raw.startsWith("//") -> "https:$raw"
+                raw.startsWith("/") -> "https://${URL(frame).host}$raw"
+                else -> "https://${URL(frame).host}/$raw"
+            }
+        } catch (_: Exception) {
+            null
+        }
     }
 
     private fun decodeStreamXHDUrl(script: String): String? {
