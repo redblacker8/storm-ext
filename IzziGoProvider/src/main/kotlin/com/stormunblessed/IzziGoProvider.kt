@@ -72,7 +72,8 @@ class IzziGoProvider(private val api: IzziGoApi) : MainAPI() {
         private val WIDEVINE_UUID: UUID = UUID.fromString("edef8ba9-79d6-4ace-a3c8-27dcd51d21ed")
         private const val PAGE_SIZE = 40
         private const val VIEW = "stb_contents_list_view"
-        private const val LICENSE_PLACEHOLDER = "https://license.izzigo.invalid/"
+        private const val LICENSE_PLACEHOLDER_HOST = "license.izzigo.invalid"
+        private const val LICENSE_PLACEHOLDER = "https://$LICENSE_PLACEHOLDER_HOST/"
         private const val USER_AGENT =
             "Mozilla/5.0 (X11; Linux x86_64; rv:153.0) Gecko/20100101 Firefox/153.0"
     }
@@ -338,7 +339,15 @@ class IzziGoProvider(private val api: IzziGoApi) : MainAPI() {
         val drmData = tryParseJson<IzziDrmData>(data) ?: return null
         return Interceptor { chain ->
             val request = chain.request()
-            if (!request.method.equals("POST", ignoreCase = true)) {
+            // Only the license request goes to the placeholder host. Everything else must be
+            // passed through untouched — most importantly the Widevine CDM provisioning POST
+            // that Media3 sends to Google's provisioning server on devices whose CDM is not
+            // provisioned (fresh/reset Android TVs). Rewriting that request to the license
+            // server makes provideProvisionResponse fail with error 6002
+            // (ERROR_CODE_DRM_PROVISIONING_FAILED) on those devices only.
+            if (!request.method.equals("POST", ignoreCase = true) ||
+                request.url.host != LICENSE_PLACEHOLDER_HOST
+            ) {
                 return@Interceptor chain.proceed(request)
             }
             val fresh = try {
