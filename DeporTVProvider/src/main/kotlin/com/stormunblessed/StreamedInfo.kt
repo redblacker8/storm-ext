@@ -2,19 +2,59 @@ package com.stormunblessed
 
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.movieproviders.transformHourToLocal
+import com.lagradost.cloudstream3.utils.AppUtils
+import com.lagradost.cloudstream3.utils.AppUtils.toJson
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 import java.text.Normalizer
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
 class StreamedInfo {
-    var mainUrl = "https://streamed.pk"
-    var matches: MatchesResult = MatchesResult();
+    var mainUrl = "https://sportsbite.org"
+    var matches: List<SBMatch> = emptyList()
+    var matchImages: Map<String, String> = emptyMap()
 
     suspend fun init() {
-        val res = app.get("$mainUrl/api/matches/all")
-        // val res = app.get("$mainUrl/api/matches/live")
-        this.matches = res.parsed<MatchesResult>()
+        // streamed.pk is gone; sportsbite.org serves the same match data (plus team logos).
+        val loaded = runCatching {
+            val res = app.get("$mainUrl/api/forestgump/matches")
+            AppUtils.tryParseJson<SportsBiteResponse>(res.text)?.days?.flatMap { it.events.orEmpty() }
+        }.getOrNull()
+        this.matches = loaded ?: emptyList()
+        this.matchImages = runCatching { fetchImages(this.matches) }.getOrNull() ?: emptyMap()
+    }
+
+    /**
+     * POST /api/event-images/batch -> team/league logos per event id.
+     * The batch "poster" field is a resize-proxy url that currently 404s, so prefer
+     * the plain /img/c/<hash>.webp team badges which serve fine.
+     */
+    private suspend fun fetchImages(events: List<SBMatch>): Map<String, String> {
+        if (events.isEmpty()) return emptyMap()
+        val body = EventImagesRequest(
+            events.map {
+                EventImageRequest(
+                    id = it.imageId(),
+                    title = it.title,
+                    league = it.category,
+                    sport = it.sport,
+                    home = it.teams?.home?.name.orEmpty(),
+                    away = it.teams?.away?.name.orEmpty(),
+                )
+            }
+        ).toJson()
+        val res = app.post(
+            "$mainUrl/api/event-images/batch",
+            requestBody = body.toRequestBody("application/json".toMediaType()),
+            headers = mapOf("Accept" to "application/json")
+        )
+        return AppUtils.tryParseJson<EventImagesResponse>(res.text)?.images?.mapNotNull { (id, img) ->
+            (img.homeLogo ?: img.awayLogo)
+                ?.let { logo -> if (logo.startsWith("http")) logo else "$mainUrl$logo" }
+                ?.let { id to it }
+        }?.toMap() ?: emptyMap()
     }
 
     private val translation = mapOf(
@@ -471,7 +511,7 @@ class StreamedInfo {
         val searchAway = searchTitle.substringAfterLast(" vs ").trim()
 
         return this.matches.firstOrNull { match ->
-            val apiTitle = match.title.replace(" vs. ", " vs ").replace(" v ", " vs ")
+            val apiTitle = match.title.orEmpty().replace(" vs. ", " vs ").replace(" v ", " vs ")
             val home = match.teams?.home?.name ?: apiTitle.substringBefore(" vs ").trim()
             val away = match.teams?.away?.name ?: apiTitle.substringAfterLast(" vs ").trim()
 
@@ -479,9 +519,8 @@ class StreamedInfo {
                     (teamMatches(home, searchAway) && teamMatches(away, searchHome))
         }?.let {
             val hourFormat = SimpleDateFormat("HH:mm", Locale.US)
-            val hourString = hourFormat.format(Date(it.date))
-            val hour = transformHourToLocal(hourString)
-            MatchId(it.title, it.poster?.replaceFirst("^/".toRegex(), "$mainUrl/"), hour)
+            val hour = it.kickoffMs?.let { ms -> transformHourToLocal(hourFormat.format(Date(ms))) }
+            MatchId(it.title.orEmpty(), matchImages[it.imageId()], hour)
         } ?: MatchId(searchHome.lowercase() + " vs " + searchAway.lowercase())
     }
 }
@@ -489,18 +528,28 @@ class StreamedInfo {
 val defaultPoster: String =
     "data:image/webp;base64,UklGRqAXAABXRUJQVlA4WAoAAAAQAAAAuwEA+QAAQUxQSHYCAAAFuQpE9D8sviVJsiRJsi2oj+v/ri/rm6p7PuuT4xPXG31DxARMwL/+7S//Nv9h/yCCluUZNi2I8M9k/+xvM8ZcdzDZI8jkmmtEMsacs3Z5ky05I8Jucy5rMT2CibUsZ7dgDGM+L+wRhOVzhOhmmOuOR9lByNEYxprrMvQIhizXFiGyZhfs0rzHdskZaTHMOffp2CPomC7kDDkHc12THU8x03INQsYaTGveZWuCFsFgzjXZ0UPYkWk5g2gwWGsaZA8hg6a1IIjBsubLeYsd95YFsRjWMu1y9gjmc5O1EEuz1po/3iPoi4+ttTSfl8m+eZCZLB9jzcfpaUw+tlyXadCeRoMmy8fFiHmbMWJBQ3Mu73M5Gxqa99oQ5t4eSLsJg27zQrsNOnZDj2M+d/zxHkdfXEdfvdQR+xT2NMI+5Q+HnsbQp5//f/7/+f/n/5//f/7/+f/n/5//f/7/+f/n/5//f/7/+f/n/5//f/7/+f/n/5+3w95G7E/6NPQ2Rp9G7NNjjfnDHse++twXexx9saNjt7zQ3TqG3NcDWTdDWLenurCwLu2BtMvCgkaMHseI0XxssmA9jQXLtFvLx+xpZD6ukY9Npqcxmebz0lrLH/cI9s19rTVLI7Qm64s9gr5YpjWMRtC0fJm3uMt1TYMRpGkt65gewnQsa00zWOQMWibYQwgmazDnIFqQtbzLtQzWmBDk2jI9h8ma62DOkDP37OgR7Mjc5xxGS+TssrzHdZlzzJrIpeXahD2CMO1i7WIsIeSadznXYRhHhI5rQ49gaMd1GLspWjmb1sgeQUZrmnNrbIjDmZZ3uWbOg0lErrlmegSTXcx1jBlWUDggBBUAABBdAJ0BKrwB+gA+KRSIQyGhIRCq1DwYAoS0t34+S+xmYZbS8rafu/Pguj+X+mD3a/6r0Z698wjyH9X/zX91/JH50/5T/D/zP+QfG/8h/7v+y/AB+nn62dcb+l/8f1AfzP+4fsN7pP+d/Yv3Efrn+w3+j+QD+j/5f//+t37C37newJ+33pqftP8HX9X/5f7oe0P/+/YA///A59Oe3f+efjx+3fsP+JfKv0X8bP65/r99e1L/h/1c+rf179qPyF5y/S16gX4n/F/7F+T/93/anjbZpPUI9Qfk3+I/vX9m/439+9Fj+U9HPq7/t/cA/in8m/xX5Tfv/9Af5HxLPG/YA/jf9g/0f+U/cP/M/Sl/Ef67++flL7TfyX+1f8r/B/5P/pf5f7A/45/OP8t/bP8p/5f8v////T9xXr1/d72I/1n/4/5/hNyMVIUKtn1xP+tUe7q9a6kMZH6zdezYo93V611C7HDNLG0fJ8EmNupCklMJ+mTwkrvJy//z9a6j68xfmXd//nvP1rqQpJSAMf8SEpV4tvdgo3UhSSl0pwbqFIdaEHkq20eKVqv6wNe4fQbBBRL4lvPpUqriO+Epfz4mBvW6KMofrNJbQPt6FwpdRUB5hkH3sut3PMsGnY6OEvv8iaSOiIHQqLa11sKV0gYYUUZI4kGcc25G5icuJoHB6NhYzZM6CtknjY/uMWvKlz72ZF2rqHAJbHRLvVVtwQLrJ2U7UoFTAkGIS0+bSAOh+/ycl54oe6XJ2+GnlI/HtlNMk8VXGak1ZBPOs/T5UorYDRd7UW1fAlN87eiTCiWjNFkbOr96+M78TuQdPSpcMYkS7M7+1XdlnNzb8sufALjLE/5VgNUBvmczqVDTpWOsgtxMvP1rqQpJIFkf2JVBI3UhSSl/P/m+Tp4zFFZ0puIUkpfz/59cuua37phXSj3dXrXUhIdnMkCxWeKY26kKSUvy2F0yS9T+Rh1xCklL+f/N3mNl0Cih82dMB50dBM2MFK1FEAD++5SS//mRf9Uv7j83H/6Faq99VX9hikjKF/JpyNveFKeMZWgp2K/hRT6U1Ba3MRGU"
 
-class MatchesResult : ArrayList<APIMatch>()
-class SourceResult : ArrayList<SourceInfo>()
-data class APIMatch(
-    val id: String,
-    val title: String,
-    val category: String,
-    val date: Long,
-    val poster: String? = null,
-    val popular: Boolean,
-    val teams: Teams? = null,
-    val sources: List<Source>
+// sportsbite.org GET /api/forestgump/matches -> { days: [ { date, events: [...] } ] }
+data class SportsBiteResponse(
+    val days: List<SportsBiteDay>? = null
 )
+
+data class SportsBiteDay(
+    val date: String? = null,
+    val events: List<SBMatch>? = null
+)
+
+data class SBMatch(
+    val title: String? = null,
+    val category: String? = null,
+    val sport: String? = null,
+    val kickoffMs: Long? = null,
+    val streamed_event_id: String? = null,
+    val event_key: String? = null,
+    val teams: Teams? = null,
+)
+
+/** Stable id used to key /api/event-images/batch results. */
+fun SBMatch.imageId(): String = streamed_event_id ?: event_key ?: title.orEmpty()
 
 data class MatchId(
     val title: String,
@@ -514,21 +563,31 @@ data class Teams(
 )
 
 data class TeamInfo(
-    val name: String?,
-    val badge: String?
+    val name: String? = null,
+    val badge: String? = null
 )
 
-data class Source(
-    val source: String,
-    val id: String
+// sportsbite.org POST /api/event-images/batch -> { images: { <id>: { poster, homeLogo, awayLogo, leagueLogo } } }
+data class EventImagesRequest(
+    val events: List<EventImageRequest>? = null
 )
 
-data class SourceInfo(
-    val id: String,
-    val streamNo: Int,
-    val language: String,
-    val hd: Boolean,
-    val embedUrl: String,
-    val source: String,
-    val viewers: Int
+data class EventImageRequest(
+    val id: String? = null,
+    val title: String? = null,
+    val league: String? = null,
+    val sport: String? = null,
+    val home: String? = null,
+    val away: String? = null,
+)
+
+data class EventImagesResponse(
+    val images: Map<String, EventImage>? = null
+)
+
+data class EventImage(
+    val poster: String? = null,
+    val homeLogo: String? = null,
+    val awayLogo: String? = null,
+    val leagueLogo: String? = null,
 )

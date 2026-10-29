@@ -1,5 +1,5 @@
 // use an integer for version numbers
-version = 2
+version = 3
 
 cloudstream {
     language = "en"
@@ -20,5 +20,5 @@ cloudstream {
         "Live",
     )
 
-    iconUrl = "https://streamed.pk/favicon.png"
+    iconUrl = "https://sportsbite.org/og-image.png"
 }

@@ -1,27 +1,27 @@
 package com.lagradost.cloudstream3.movieproviders
 
-import android.util.Log
-import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
-import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 import com.lagradost.cloudstream3.utils.AppUtils
-import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import com.lagradost.cloudstream3.utils.AppUtils.toJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.loadExtractor
-import com.lagradost.cloudstream3.utils.newExtractorLink
+import com.lagradost.cloudstream3.utils.M3u8Helper
 import com.stormunblessed.APIMatch
-import com.stormunblessed.MatchesResult
-import com.stormunblessed.SourceResult
-import com.stormunblessed.SportsResult
+import com.stormunblessed.EventImage
+import com.stormunblessed.EventImageRequest
+import com.stormunblessed.EventImagesRequest
+import com.stormunblessed.EventImagesResponse
+import com.stormunblessed.SBStream
+import com.stormunblessed.SportsBiteMatches
 import com.stormunblessed.defaultPoster
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import org.jsoup.nodes.Element
+import com.stormunblessed.imageId
+import com.stormunblessed.loadSourceNameExtractor
+import com.stormunblessed.normalizeSourceServer
+import com.stormunblessed.standardSourceName
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 
 class StreamedProvider : MainAPI() {
-    override var mainUrl = "https://streamed.pk"
+    override var mainUrl = "https://sportsbite.org"
     override var name = "Streamed Sports"
     override var lang = "en"
     override val hasMainPage = true
@@ -33,29 +33,80 @@ class StreamedProvider : MainAPI() {
     )
 
     override val mainPage = mainPageOf(
-        "/api/matches/live/popular" to "Live Popular",
-        "/api/matches/live" to "Live",
-        "/api/matches/football/popular" to "Football",
-        "/api/matches/basketball/popular" to "Basketball",
-        "/api/matches/baseball/popular" to "Baseball",
-        "/api/matches/tennis/popular" to "Tennis",
-        "/api/matches/fight/popular" to "Fight",
-        "/api/matches/american-football/popular" to "Am. Football",
-        "/api/matches/hockey/popular" to "Hockey",
-        "/api/matches/rugby/popular" to "Rugby",
-        "/api/matches/cricket/popular" to "Cricket",
-        "/api/matches/golf/popular" to "Golf",
-        "/api/matches/motor-sports/popular" to "Motor Sports",
-        "/api/matches/afl/popular" to "AFL",
-        "/api/matches/billiards/popular" to "Billiards",
-        "/api/matches/darts/popular" to "Darts",
-        "/api/matches/other/popular" to "Other",
+        "live" to "Live",
+        "popular" to "Popular",
+        "football" to "Football",
+        "basketball" to "Basketball",
+        "american-football" to "Am. Football",
+        "hockey" to "Hockey",
+        "tennis" to "Tennis",
+        "fighting" to "Fighting",
+        "wrestling" to "Wrestling",
+        "baseball" to "Baseball",
+        "cricket" to "Cricket",
+        "golf" to "Golf",
+        "all" to "All Sports",
     )
 
+    /** GET /api/forestgump/matches -> every day's events flattened. Empty list on any failure. */
+    private suspend fun fetchMatches(): List<APIMatch> {
+        return runCatching {
+            val text = app.get("$mainUrl/api/forestgump/matches").text
+            AppUtils.tryParseJson<SportsBiteMatches>(text)?.days?.flatMap { it.events.orEmpty() }
+        }.getOrNull() ?: emptyList()
+    }
+
+    /**
+     * POST /api/event-images/batch -> team/league logos per event id.
+     * The batch "poster" field is a resize-proxy url that currently 404s, so prefer
+     * the plain /img/c/<hash>.webp team badges which serve fine.
+     */
+    private suspend fun fetchImages(events: List<APIMatch>): Map<String, String> {
+        if (events.isEmpty()) return emptyMap()
+        return runCatching {
+            val body = EventImagesRequest(
+                events.map {
+                    EventImageRequest(
+                        id = it.imageId(),
+                        title = it.title,
+                        league = it.category,
+                        sport = it.sport,
+                        home = it.teams?.home?.name.orEmpty(),
+                        away = it.teams?.away?.name.orEmpty(),
+                    )
+                }
+            ).toJson()
+            val res = app.post(
+                "$mainUrl/api/event-images/batch",
+                requestBody = body.toRequestBody("application/json".toMediaType()),
+                headers = mapOf("Accept" to "application/json")
+            )
+            AppUtils.tryParseJson<EventImagesResponse>(res.text)?.images?.mapNotNull { (id, img) ->
+                (img.homeLogo ?: img.awayLogo)?.absoluteImageUrl()?.let { id to it }
+            }?.toMap()
+        }.getOrNull() ?: emptyMap()
+    }
+
+    private fun String.absoluteImageUrl(): String =
+        if (this.startsWith("http")) this else "$mainUrl$this"
+
+    private fun APIMatch.toSearchResult(poster: String?): SearchResponse {
+        return newLiveSearchResponse(this.title ?: "Unknown", this.toJson(), TvType.Live) {
+            this.posterUrl = poster ?: defaultPoster
+        }
+    }
+
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val res = app.get("$mainUrl${request.data}")
-        val document = res.parsed<MatchesResult>()
-        val home = document.map { it.toSearchResult() }
+        val events = fetchMatches().let { all ->
+            when (request.data) {
+                "all" -> all
+                "live" -> all.filter { it.live == true }
+                "popular" -> all.filter { it.popular == true }
+                else -> all.filter { it.sport == request.data || it.category == request.data }
+            }
+        }.sortedBy { it.kickoffMs ?: Long.MAX_VALUE }
+        val posters = fetchImages(events)
+        val home = events.map { it.toSearchResult(posters[it.imageId()]) }
         return newHomePageResponse(
             list = HomePageList(
                 name = request.name,
@@ -66,32 +117,20 @@ class StreamedProvider : MainAPI() {
         )
     }
 
-    private fun APIMatch.toSearchResult(): SearchResponse {
-        val title = this.title
-        val href = this.toJson()
-        val posterUrl = if (this.poster != null) "$mainUrl${this.poster}" else defaultPoster
-        return newLiveSearchResponse(title, href, TvType.Movie) {
-            this.posterUrl = posterUrl
-        }
-    }
-
     override suspend fun search(query: String): List<SearchResponse> {
         if (query.isBlank()) return emptyList()
-        val sports = app.get("$mainUrl/api/sports").parsed<SportsResult>().map { it.id }
-        val allMatches = sports.amap { sportId ->
-            runCatching {
-                app.get("$mainUrl/api/matches/$sportId/popular").parsed<MatchesResult>()
-            }.getOrDefault(MatchesResult())
-        }.flatten().distinctBy { it.id }
-        return allMatches.filter {
-            it.title.contains(query, ignoreCase = true)
-        }.map { it.toSearchResult() }
+        val events = fetchMatches().filter {
+            it.title?.contains(query, ignoreCase = true) == true
+        }
+        val posters = fetchImages(events)
+        return events.map { it.toSearchResult(posters[it.imageId()]) }
     }
 
     override suspend fun load(url: String): LoadResponse? {
-        val info = AppUtils.parseJson<APIMatch>(url)
-        return newLiveStreamLoadResponse(info.title, url, url) {
-            this.posterUrl = if (info.poster != null) "$mainUrl${info.poster}" else defaultPoster
+        val info = AppUtils.tryParseJson<APIMatch>(url) ?: return null
+        val poster = fetchImages(listOf(info))[info.imageId()]
+        return newLiveStreamLoadResponse(info.title ?: "Unknown", url, url) {
+            this.posterUrl = poster ?: defaultPoster
         }
     }
 
@@ -101,47 +140,58 @@ class StreamedProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val info = AppUtils.parseJson<APIMatch>(data)
-        info.sources.amap {
-            val doc = app.get("$mainUrl/api/stream/${it.source}/${it.id}").parsed<SourceResult>()
-            val sorted = doc.sortedByDescending { it.language.equals("Spanish")  || it.hd}
-            sorted.amap {
-                val lang = if (it.language.isNotBlank()) "-${it.language}" else it.language
-                loadSourceNameExtractor(
-                    "${it.source}$lang",
-                    it.embedUrl,
-                    "$mainUrl/",
-                    subtitleCallback,
-                    callback
-                )
-            }
+        val info = AppUtils.tryParseJson<APIMatch>(data) ?: return false
+        val streams = info.streams.orEmpty().filter { !it.manifest_url.isNullOrBlank() }
+        streams.amap { stream ->
+            runCatching { resolveStream(stream, subtitleCallback, callback) }
         }
         return true
     }
-}
 
-suspend fun loadSourceNameExtractor(
-    source: String,
-    url: String,
-    referer: String? = null,
-    subtitleCallback: (SubtitleFile) -> Unit,
-    callback: (ExtractorLink) -> Unit,
-) {
-    loadExtractor(url, referer, subtitleCallback) { link ->
-        CoroutineScope(Dispatchers.IO).launch {
-            callback.invoke(
-                newExtractorLink(
-                    "$source[${link.source}]",
-                    "$source[${link.source}]",
-                    link.url,
-                ) {
-                    this.quality = link.quality
-                    this.type = link.type
-                    this.referer = link.referer
-                    this.headers = link.headers
-                    this.extractorData = link.extractorData
-                }
-            )
+    /**
+     * Every sportsbite stream is an iframe player whose page embeds the HLS url as
+     * `var source = window.atob("<base64>")`; fetch it and hand the manifest to M3u8Helper.
+     * Direct .m3u8 links are passed through, anything else falls back to the generic extractors.
+     */
+    private suspend fun resolveStream(
+        stream: SBStream,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        val embed = stream.manifest_url ?: return
+        val server = stream.source ?: stream.name
+        val lang = stream.language
+        if (embed.contains(".m3u8")) {
+            generateLinks(server, lang, embed, "$mainUrl/", callback)
+            return
         }
+        val html = app.get(
+            embed,
+            referer = "$mainUrl/",
+            headers = mapOf("Sec-Fetch-Dest" to "iframe")
+        ).text
+        val encoded = Regex("""window\.atob\("([A-Za-z0-9+/=]+)"\)""")
+            .find(html)?.groupValues?.get(1)
+        val m3u8 = encoded?.let { base64Decode(it) }
+        if (!m3u8.isNullOrBlank() && m3u8.startsWith("http")) {
+            generateLinks(server, lang, m3u8, embed, callback)
+        } else {
+            loadSourceNameExtractor(lang, embed, "$mainUrl/", subtitleCallback, callback)
+        }
+    }
+
+    private suspend fun generateLinks(
+        server: String?,
+        lang: String?,
+        m3u8: String,
+        referer: String,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        M3u8Helper.generateM3u8(
+            normalizeSourceServer(server),
+            m3u8,
+            referer,
+            name = standardSourceName(lang, server)
+        ).forEach(callback)
     }
 }
