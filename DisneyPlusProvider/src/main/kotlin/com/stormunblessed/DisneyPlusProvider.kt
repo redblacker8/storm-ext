@@ -70,6 +70,9 @@ class DisneyPlusProvider(private val api: DisneyApi) : MainAPI() {
         val builtAt: Long,
         val availabilityStartTime: String? = null,
         val presentationTimeOffset: Long? = null,
+        /** Cached master metadata so a live refresh skips the master playlist. */
+        val plan: DisneyDash.Plan? = null,
+        val subtitles: List<DisneyDash.SubtitleRendition> = emptyList(),
     )
 
     private val dashManifests = java.util.concurrent.ConcurrentHashMap<String, DashSource>()
@@ -1109,7 +1112,13 @@ class DisneyPlusProvider(private val api: DisneyApi) : MainAPI() {
         // Disney+ is HLS-only, but CloudStream plays DRM exclusively through DASH.
         // Convert the HLS master to a DASH manifest and serve it via the interceptor.
         val preferredAudio = runCatching { api.profileContext().appLanguage }.getOrNull()
+        val buildStarted = System.currentTimeMillis()
         val built = runCatching { DisneyDash.buildManifest(streamUrl, preferredAudio) }.getOrNull()
+        Log.i(
+            "DisneyLive",
+            "buildManifest ${System.currentTimeMillis() - buildStarted} ms live=${built?.live} " +
+                "xml=${built?.xml?.length ?: 0} bytes plan=${built?.plan?.variants?.size ?: 0} variants",
+        )
         if (built != null) {
             dashManifests[streamUrl] = DashSource(
                 hlsUrl = streamUrl,
@@ -1119,12 +1128,17 @@ class DisneyPlusProvider(private val api: DisneyApi) : MainAPI() {
                 builtAt = System.currentTimeMillis(),
                 availabilityStartTime = built.availabilityStartTime,
                 presentationTimeOffset = built.presentationTimeOffset,
+                plan = built.plan,
+                subtitles = built.subtitles,
             )
         }
 
         // HLS subtitles are WebVTT segments; expose one proxy .vtt URL per language
-        // and let the interceptor merge the segments when the user picks one.
-        val subtitles = runCatching { DisneyDash.buildSubtitles(streamUrl) }.getOrDefault(emptyList())
+        // and let the interceptor merge the segments when the user picks one. The
+        // renditions come from the same master fetch as the manifest, so no second
+        // master request is needed.
+        val subtitles = built?.subtitles
+            ?: runCatching { DisneyDash.buildSubtitles(streamUrl) }.getOrDefault(emptyList())
         subtitles.forEachIndexed { index, subtitle ->
             val proxyUrl = "https://disney.local/subtitles/$index.vtt"
             subtitleSources[proxyUrl] = subtitle.playlistUrl
@@ -1234,15 +1248,30 @@ class DisneyPlusProvider(private val api: DisneyApi) : MainAPI() {
     private fun refreshIfLive(url: String, source: DashSource): String {
         if (!source.live) return source.xml
         if (System.currentTimeMillis() - source.builtAt < LIVE_REFRESH_MS) return source.xml
+        val started = System.currentTimeMillis()
+        val plan = source.plan
         val rebuilt = runCatching {
             runBlocking {
-                DisneyDash.buildManifest(
-                    hlsUrl = source.hlsUrl,
-                    preferredAudio = source.preferredAudio,
-                    direct = true,
-                    anchorStartTime = source.availabilityStartTime,
-                    anchorTimeOffset = source.presentationTimeOffset,
-                )
+                if (plan != null) {
+                    // Skip the master playlist entirely: only re-fetch the media
+                    // playlists we already resolved during the initial load.
+                    DisneyDash.refreshManifest(
+                        plan = plan,
+                        preferredAudio = source.preferredAudio,
+                        direct = true,
+                        anchorStartTime = source.availabilityStartTime,
+                        anchorTimeOffset = source.presentationTimeOffset,
+                        subtitles = source.subtitles,
+                    )
+                } else {
+                    DisneyDash.buildManifest(
+                        hlsUrl = source.hlsUrl,
+                        preferredAudio = source.preferredAudio,
+                        direct = true,
+                        anchorStartTime = source.availabilityStartTime,
+                        anchorTimeOffset = source.presentationTimeOffset,
+                    )
+                }
             }
         }.getOrNull()
         if (rebuilt == null || !rebuilt.live) {
@@ -1252,10 +1281,13 @@ class DisneyPlusProvider(private val api: DisneyApi) : MainAPI() {
         dashManifests[url] = source.copy(
             xml = rebuilt.xml,
             builtAt = System.currentTimeMillis(),
+            plan = rebuilt.plan ?: plan,
+            subtitles = rebuilt.subtitles.ifEmpty { source.subtitles },
         )
         Log.i(
             "DisneyLive",
-            "manifest rebuilt: ${rebuilt.xml.length} bytes, " +
+            "manifest rebuilt in ${System.currentTimeMillis() - started} ms: " +
+                "${rebuilt.xml.length} bytes, variants=${rebuilt.plan?.variants?.size ?: 0}, " +
                 "availabilityStartTime=${rebuilt.availabilityStartTime}, " +
                 "presentationTimeOffset=${rebuilt.presentationTimeOffset}",
         )

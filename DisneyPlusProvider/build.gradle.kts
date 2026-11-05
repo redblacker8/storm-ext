@@ -1,5 +1,5 @@
 // use an integer for version numbers
-version = 2
+version = 3
 
 cloudstream {
     language = "mx"
@@ -13,7 +13,7 @@ cloudstream {
      * 2: Slow
      * 3: Beta only
      * */
-    status = 3 // Beta only
+    status = 1
     tvTypes = listOf(
         "Movie",
         "TvSeries",

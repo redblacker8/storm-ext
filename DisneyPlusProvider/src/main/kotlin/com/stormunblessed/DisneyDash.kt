@@ -2,6 +2,9 @@ package com.stormunblessed
 
 import android.util.Base64
 import com.lagradost.cloudstream3.app
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import java.net.URI
 import java.util.Locale
 import kotlin.math.roundToLong
@@ -21,11 +24,34 @@ internal object DisneyDash {
 
     private data class Segment(val url: String, val durationMs: Long, val time: Long?)
 
-    private data class WidevineKey(
+    data class WidevineKey(
         val pssh: String,
         val kid: String?,
         /** "cenc" for SAMPLE-AES-CTR, "cbcs" for SAMPLE-AES. */
         val scheme: String,
+    )
+
+    /** One video rendition from the HLS master, kept so live refreshes skip the master. */
+    data class VariantInfo(
+        val url: String,
+        val bandwidth: Long,
+        val codecs: String?,
+        val resolution: String?,
+        val audioGroup: String?,
+    )
+
+    /** One audio rendition from the HLS master. */
+    data class AudioInfo(
+        val url: String,
+        val lang: String?,
+        val group: String?,
+    )
+
+    /** Cached master metadata so a live refresh only re-fetches the media playlists. */
+    data class Plan(
+        val variants: List<VariantInfo>,
+        val audios: List<AudioInfo>,
+        val masterKey: WidevineKey?,
     )
 
     private data class Track(
@@ -36,6 +62,10 @@ internal object DisneyDash {
         val key: WidevineKey? = null,
         /** #EXT-X-PROGRAM-DATE-TIME of the chosen section's first segment. */
         val pdt: String? = null,
+        /** CODECS attribute of the variant, used per Representation. */
+        val codecs: String? = null,
+        /** RESOLUTION attribute of the variant, used per Representation. */
+        val resolution: String? = null,
     )
 
     private data class Section(
@@ -50,6 +80,10 @@ internal object DisneyDash {
         val live: Boolean,
         val availabilityStartTime: String? = null,
         val presentationTimeOffset: Long? = null,
+        /** Master metadata so live refreshes only re-fetch the media playlists. */
+        val plan: Plan? = null,
+        /** Subtitle renditions parsed from the same master fetch. */
+        val subtitles: List<SubtitleRendition> = emptyList(),
     )
 
     /**
@@ -79,75 +113,161 @@ internal object DisneyDash {
         // as a fallback and only mark tracks that actually carry one.
         val masterKey = findWidevineKey(master)
 
-        var variantUri: String? = null
+        // Collect every video rendition so ExoPlayer can start on a cheap one and
+        // step up as bandwidth allows, instead of blocking on the top tier.
+        val variants = mutableListOf<VariantInfo>()
         var audioGroup: String? = null
-        var codecs: String? = null
-        var resolution: String? = null
-        var variantBandwidth = 0L
-        var score = Long.MIN_VALUE
+        var bestRank = Long.MIN_VALUE
         for (index in lines.indices) {
             val line = lines[index]
             if (!line.startsWith("#EXT-X-STREAM-INF:")) continue
+            val uri = lines.getOrNull(index + 1)?.takeIf { !it.startsWith("#") } ?: continue
             val bandwidth = attr(line, "BANDWIDTH")?.toLongOrNull() ?: 0L
-            val next = lines.getOrNull(index + 1)?.takeIf { !it.startsWith("#") } ?: continue
             val group = attr(line, "AUDIO")
+            variants.add(
+                VariantInfo(
+                    url = resolve(hlsUrl, uri),
+                    bandwidth = bandwidth,
+                    codecs = attr(line, "CODECS")?.substringBefore(",")?.trim(),
+                    resolution = attr(line, "RESOLUTION"),
+                    audioGroup = group,
+                )
+            )
             // Prefer AAC stereo audio over E-AC-3 for device compatibility.
             val rank = bandwidth + if (group?.contains("aac", ignoreCase = true) == true) 100_000_000L else 0L
-            if (rank <= score) continue
-            score = rank
-            variantUri = next
-            audioGroup = group
-            codecs = attr(line, "CODECS")?.substringBefore(",")?.trim()
-            resolution = attr(line, "RESOLUTION")
-            variantBandwidth = bandwidth
+            if (rank > bestRank) {
+                bestRank = rank
+                audioGroup = group
+            }
         }
-        if (variantUri == null) return null
+        if (variants.isEmpty()) return null
 
-        val videoUrl = resolve(hlsUrl, variantUri)
-        val videoText = fetch(videoUrl, direct) ?: return null
-        val live = !videoText.contains("#EXT-X-ENDLIST")
-        val videoKey = findWidevineKey(videoText) ?: masterKey
-        val video = parseTrack(videoUrl, videoText, variantBandwidth, keepLast = live)
-            ?.copy(key = videoKey)
-            ?: return null
-
-        val audioLines = lines.filter {
+        val audios = lines.filter {
             it.startsWith("#EXT-X-MEDIA:") &&
                 attr(it, "TYPE") == "AUDIO" &&
                 (audioGroup == null || attr(it, "GROUP-ID") == audioGroup) &&
                 !attr(it, "URI").isNullOrBlank()
-        }
-        val audioTracks = audioLines.mapNotNull { line ->
+        }.mapNotNull { line ->
             val uri = attr(line, "URI") ?: return@mapNotNull null
-            val url = resolve(hlsUrl, uri)
-            val text = fetch(url, direct) ?: return@mapNotNull null
-            val audioKey = findWidevineKey(text) ?: masterKey
-            val track = parseTrack(url, text, 128_000L, keepLast = !text.contains("#EXT-X-ENDLIST"))
-                ?.copy(lang = attr(line, "LANGUAGE"), key = audioKey)
-                ?: return@mapNotNull null
-            track
+            AudioInfo(
+                url = resolve(hlsUrl, uri),
+                lang = attr(line, "LANGUAGE"),
+                group = attr(line, "GROUP-ID"),
+            )
         }.sortedBy { audioPreference(it.lang, preferredAudio) }
+
+        // Parse subtitles from the same master fetch so loadLinks does not need
+        // a second master request.
+        val subtitles = lines.filter {
+            it.startsWith("#EXT-X-MEDIA:") &&
+                attr(it, "TYPE") == "SUBTITLES" &&
+                !attr(it, "URI").isNullOrBlank()
+        }.mapNotNull { line ->
+            val uri = attr(line, "URI") ?: return@mapNotNull null
+            val lang = attr(line, "LANGUAGE") ?: return@mapNotNull null
+            SubtitleRendition(attr(line, "NAME") ?: lang, lang, resolve(hlsUrl, uri))
+        }
+
+        return buildFromPlan(
+            plan = Plan(
+                variants = limitVariants(variants),
+                audios = audios,
+                masterKey = masterKey,
+            ),
+            preferredAudio = preferredAudio,
+            direct = direct,
+            anchorStartTime = anchorStartTime,
+            anchorTimeOffset = anchorTimeOffset,
+            windowSeconds = windowSeconds,
+            subtitles = subtitles,
+        )
+    }
+
+    /**
+     * Rebuilds a manifest from a cached [Plan], so a live refresh only re-fetches
+     * the media playlists and never the master.
+     */
+    suspend fun refreshManifest(
+        plan: Plan,
+        preferredAudio: String?,
+        direct: Boolean = true,
+        anchorStartTime: String? = null,
+        anchorTimeOffset: Long? = null,
+        windowSeconds: Long = LIVE_WINDOW_SECONDS,
+        subtitles: List<SubtitleRendition> = emptyList(),
+    ): BuiltManifest? = buildFromPlan(
+        plan = plan,
+        preferredAudio = preferredAudio,
+        direct = direct,
+        anchorStartTime = anchorStartTime,
+        anchorTimeOffset = anchorTimeOffset,
+        windowSeconds = windowSeconds,
+        subtitles = subtitles,
+    )
+
+    private suspend fun buildFromPlan(
+        plan: Plan,
+        preferredAudio: String?,
+        direct: Boolean,
+        anchorStartTime: String?,
+        anchorTimeOffset: Long?,
+        windowSeconds: Long,
+        subtitles: List<SubtitleRendition>,
+    ): BuiltManifest? {
+        // Fetch every rendition in parallel so ABR costs no extra round trips.
+        val (videoPairs, audioTracks) = coroutineScope {
+            val videoJobs = plan.variants.map { variant ->
+                async {
+                    val text = fetch(variant.url, direct) ?: return@async null
+                    val key = findWidevineKey(text) ?: plan.masterKey
+                    val track = parseTrack(
+                        variant.url, text, variant.bandwidth,
+                        keepLast = !text.contains("#EXT-X-ENDLIST"),
+                    )?.copy(
+                        key = key,
+                        codecs = variant.codecs,
+                        resolution = variant.resolution,
+                    ) ?: return@async null
+                    track to text
+                }
+            }
+            val audioJobs = plan.audios.map { info ->
+                async {
+                    val text = fetch(info.url, direct) ?: return@async null
+                    val key = findWidevineKey(text) ?: plan.masterKey
+                    parseTrack(
+                        info.url, text, 128_000L,
+                        keepLast = !text.contains("#EXT-X-ENDLIST"),
+                    )?.copy(lang = info.lang, key = key)
+                }
+            }
+            val videos = videoJobs.awaitAll().filterNotNull()
+            val audios = audioJobs.awaitAll().filterNotNull()
+            videos to audios
+        }
+        if (videoPairs.isEmpty()) return null
+
+        val videos = videoPairs.map { it.first }
+        val live = videoPairs.none { it.second.contains("#EXT-X-ENDLIST") }
 
         // For live playlists keep the anchor fixed for the whole presentation and
         // slide the segment window so each refreshed manifest stays small.
-        val anchorPdt = if (live) anchorStartTime ?: video.pdt else null
-        val anchorTime = if (live) anchorTimeOffset ?: video.segments.firstOrNull()?.time else null
-        val windowVideo = if (live) trimToWindow(video, windowSeconds) else video
+        val anchorPdt = if (live) anchorStartTime ?: videos.first().pdt else null
+        val anchorTime = if (live) anchorTimeOffset ?: videos.first().segments.firstOrNull()?.time else null
+        val windowVideos = if (live) videos.map { trimToWindow(it, windowSeconds) } else videos
         val windowAudio = if (live) audioTracks.map { trimToWindow(it, windowSeconds) } else audioTracks
 
         val liveConfig = if (live && anchorTime != null) {
             LiveConfig(
                 availabilityStartTime = anchorPdt ?: nowIso(),
                 presentationTimeOffset = anchorTime,
-                timeShiftBufferDepthSeconds = bufferDurationSeconds(windowVideo),
-                minimumUpdatePeriodSeconds = segmentDurationSeconds(windowVideo),
+                timeShiftBufferDepthSeconds = bufferDurationSeconds(windowVideos.first()),
+                minimumUpdatePeriodSeconds = segmentDurationSeconds(windowVideos.first()),
             )
         } else null
 
         val xml = buildMpd(
-            video = windowVideo,
-            videoCodecs = codecs,
-            resolution = resolution,
+            videos = windowVideos,
             audioTracks = windowAudio,
             live = liveConfig,
         )
@@ -156,7 +276,26 @@ internal object DisneyDash {
             live = live,
             availabilityStartTime = liveConfig?.availabilityStartTime,
             presentationTimeOffset = liveConfig?.presentationTimeOffset,
+            plan = plan,
+            subtitles = subtitles,
         )
+    }
+
+    /**
+     * Keeps ABR useful without letting a live refresh re-fetch a dozen playlists.
+     * Always keeps the cheapest and most expensive rendition, evenly spaced.
+     */
+    private fun limitVariants(variants: List<VariantInfo>): List<VariantInfo> {
+        val sorted = variants.sortedBy { it.bandwidth }
+        if (sorted.size <= MAX_ABR_VARIANTS) return sorted
+        val last = sorted.size - 1
+        val indexes = linkedSetOf(
+            0,
+            last / 3,
+            (last * 2) / 3,
+            last,
+        ).filter { it in 0..last }
+        return indexes.map { sorted[it] }
     }
 
     suspend fun buildSubtitles(hlsUrl: String): List<SubtitleRendition> {
@@ -299,14 +438,12 @@ internal object DisneyDash {
     }
 
     private fun buildMpd(
-        video: Track,
-        videoCodecs: String?,
-        resolution: String?,
+        videos: List<Track>,
         audioTracks: List<Track>,
         live: LiveConfig? = null,
     ): String {
-        val (width, height) = parseResolution(resolution)
-        val out = StringBuilder(48 * 1024)
+        val first = videos.first()
+        val out = StringBuilder(64 * 1024)
         out.append("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n")
         out.append("<MPD xmlns=\"urn:mpeg:dash:schema:mpd:2011\" xmlns:cenc=\"urn:mpeg:cenc:2013\" ")
         if (live != null) {
@@ -317,12 +454,12 @@ internal object DisneyDash {
             out.append("timeShiftBufferDepth=\"PT").append(live.timeShiftBufferDepthSeconds).append("S\" ")
             out.append("suggestedPresentationDelay=\"PT6S\" ")
         } else {
-            val duration = String.format(Locale.US, "PT%.3fS", videoDurationMs(video) / 1000.0)
+            val duration = String.format(Locale.US, "PT%.3fS", videoDurationMs(first) / 1000.0)
             out.append("type=\"static\" mediaPresentationDuration=\"").append(duration).append("\" ")
         }
         out.append("minBufferTime=\"PT2S\" profiles=\"urn:mpeg:dash:profile:isoff-main:2011\">\n")
         out.append(if (live != null) "<Period id=\"0\" start=\"PT0S\">\n" else "<Period>\n")
-        appendTrack(out, video, "video", "video/mp4", videoCodecs, width, height, null, video.key, "video", live)
+        appendVideoSet(out, videos, live)
         audioTracks.forEachIndexed { index, track ->
             appendTrack(
                 out, track, "audio", "audio/mp4", "mp4a.40.2",
@@ -331,6 +468,35 @@ internal object DisneyDash {
         }
         out.append("</Period>\n</MPD>\n")
         return out.toString()
+    }
+
+    /**
+     * Writes one video AdaptationSet holding every rendition. Media3's ABR can
+     * then start on the cheapest representation instead of blocking on the top
+     * tier while a multi-megabyte first segment downloads.
+     */
+    private fun appendVideoSet(out: StringBuilder, videos: List<Track>, live: LiveConfig?) {
+        if (videos.isEmpty()) return
+        val first = videos.first()
+        out.append("<AdaptationSet contentType=\"video\" mimeType=\"video/mp4\"")
+        first.codecs?.takeIf { it.isNotBlank() }
+            ?.let { out.append(" codecs=\"").append(escape(it)).append('"') }
+        out.append(">\n")
+        appendContentProtection(out, first.key)
+        videos.forEachIndexed { index, track ->
+            val (width, height) = parseResolution(track.resolution)
+            appendRepresentation(
+                out = out,
+                track = track,
+                mimeType = "video/mp4",
+                codecs = track.codecs,
+                width = width,
+                height = height,
+                id = "video_$index",
+                live = live,
+            )
+        }
+        out.append("</AdaptationSet>\n")
     }
 
     private fun videoDurationMs(track: Track): Long {
@@ -374,6 +540,20 @@ internal object DisneyDash {
         return track.copy(segments = trimmed)
     }
 
+    private fun appendContentProtection(out: StringBuilder, key: WidevineKey?) {
+        if (key == null) return
+        out.append("<ContentProtection schemeIdUri=\"urn:mpeg:dash:mp4protection:2011\" value=\"")
+            .append(key.scheme).append('"')
+        key.kid?.let { out.append(" cenc:default_KID=\"").append(it).append('"') }
+        out.append("/>\n")
+        out.append("<ContentProtection schemeIdUri=\"").append(WIDEVINE_KEYFORMAT).append('"')
+        key.kid?.let { out.append(" cenc:default_KID=\"").append(it).append('"') }
+        out.append('>')
+        out.append("<cenc:pssh>").append(key.pssh).append("</cenc:pssh>")
+        out.append("</ContentProtection>\n")
+    }
+
+    /** Writes a single audio AdaptationSet (one rendition per language). */
     private fun appendTrack(
         out: StringBuilder,
         track: Track,
@@ -395,18 +575,21 @@ internal object DisneyDash {
         lang?.takeIf { it.isNotBlank() }?.let { out.append(" lang=\"").append(escape(it)).append('"') }
         out.append(">\n")
 
-        if (key != null) {
-            out.append("<ContentProtection schemeIdUri=\"urn:mpeg:dash:mp4protection:2011\" value=\"")
-                .append(key.scheme).append('"')
-            key.kid?.let { out.append(" cenc:default_KID=\"").append(it).append('"') }
-            out.append("/>\n")
-            out.append("<ContentProtection schemeIdUri=\"").append(WIDEVINE_KEYFORMAT).append('"')
-            key.kid?.let { out.append(" cenc:default_KID=\"").append(it).append('"') }
-            out.append('>')
-            out.append("<cenc:pssh>").append(key.pssh).append("</cenc:pssh>")
-            out.append("</ContentProtection>\n")
-        }
+        appendContentProtection(out, key)
+        appendRepresentation(out, track, mimeType, codecs, width, height, id, live)
+        out.append("</AdaptationSet>\n")
+    }
 
+    private fun appendRepresentation(
+        out: StringBuilder,
+        track: Track,
+        mimeType: String,
+        codecs: String?,
+        width: Int?,
+        height: Int?,
+        id: String,
+        live: LiveConfig? = null,
+    ) {
         // Media3 only builds track formats from explicit Representation elements.
         out.append("<Representation id=\"").append(id)
             .append("\" bandwidth=\"").append(track.bandwidth.coerceAtLeast(1L))
@@ -443,7 +626,6 @@ internal object DisneyDash {
             out.append("</SegmentList>\n")
         }
         out.append("</Representation>\n")
-        out.append("</AdaptationSet>\n")
     }
 
     private fun appendTimeline(out: StringBuilder, segments: List<Segment>, timescale: Int) {
@@ -577,4 +759,7 @@ internal object DisneyDash {
 
     /** How much DVR history to keep in a refreshed live manifest. */
     private const val LIVE_WINDOW_SECONDS = 300L
+
+    /** Cap on video renditions kept in the manifest so live refreshes stay cheap. */
+    private const val MAX_ABR_VARIANTS = 4
 }

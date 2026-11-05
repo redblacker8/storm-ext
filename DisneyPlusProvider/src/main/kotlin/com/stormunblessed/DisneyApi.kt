@@ -738,7 +738,7 @@ class DisneyApi(private val prefs: SharedPreferences) {
                     "playbackInitiationContext" to "ONLINE",
                     "slugDuration" to "SLUG_500_MS",
                     "maxSlideDuration" to "4_HOUR",
-                    "resolution" to mapOf("max" to listOf("1280x720")),
+                    "resolution" to mapOf("max" to listOf("1920x1080")),
                 ),
             ),
         )
