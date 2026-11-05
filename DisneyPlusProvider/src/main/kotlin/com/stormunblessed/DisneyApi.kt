@@ -6,12 +6,20 @@ import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.lagradost.cloudstream3.ErrorLoadingException
 import com.lagradost.cloudstream3.app
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.net.URLEncoder
 
 class DisneyApi(private val prefs: SharedPreferences) {
 
     private val mapper = ObjectMapper()
+    private val configMutex = Mutex()
+    private val refreshMutex = Mutex()
+    private val accountMutex = Mutex()
+    private val profileMutex = Mutex()
+    @Volatile
     private var cachedConfig: JsonNode? = null
+    @Volatile
     private var accountCache: Pair<Long, JsonNode>? = null
     private var pendingEmail: String? = null
     private var pendingToken: String? = null
@@ -38,9 +46,12 @@ class DisneyApi(private val prefs: SharedPreferences) {
 
     private suspend fun getConfig(): JsonNode {
         cachedConfig?.let { return it }
-        val json = mapper.readTree(app.get(DisneyConstants.CONFIG_URL, headers = baseHeaders).text)
-        cachedConfig = json
-        return json
+        return configMutex.withLock {
+            cachedConfig?.let { return@withLock it }
+            val json = mapper.readTree(app.get(DisneyConstants.CONFIG_URL, headers = baseHeaders).text)
+            cachedConfig = json
+            json
+        }
     }
 
     private suspend fun orchestrationEndpoint(name: String): String =
@@ -102,10 +113,10 @@ class DisneyApi(private val prefs: SharedPreferences) {
         }
     }
 
-    suspend fun refreshToken(force: Boolean = false): Boolean {
-        val refreshToken = prefs.getString(DisneyConstants.KEY_REFRESH_TOKEN, null) ?: return false
+    suspend fun refreshToken(force: Boolean = false): Boolean = refreshMutex.withLock {
+        val refreshToken = prefs.getString(DisneyConstants.KEY_REFRESH_TOKEN, null) ?: return@withLock false
         val expires = prefs.getLong(DisneyConstants.KEY_EXPIRES, 0L)
-        if (!force && expires > System.currentTimeMillis() / 1000L) return true
+        if (!force && expires > System.currentTimeMillis() / 1000L) return@withLock true
 
         val endpoint = orchestrationEndpoint("refreshToken")
         val json = graphql(
@@ -116,7 +127,7 @@ class DisneyApi(private val prefs: SharedPreferences) {
             authorization = DisneyConstants.API_KEY,
         )
         setAuth(json["extensions"]["sdk"])
-        return true
+        true
     }
 
     data class DeviceSession(val sdk: JsonNode, val region: String?)
@@ -379,19 +390,27 @@ class DisneyApi(private val prefs: SharedPreferences) {
         val cached = accountCache
         if (!force && cached != null && now - cached.first < 5 * 60 * 1000L) return cached.second
 
-        refreshToken()
-        val endpoint = orchestrationEndpoint("query")
-        val json = graphql(
-            endpoint = endpoint,
-            operationName = "EntitledGraphMeQuery",
-            variables = emptyMap<String, Any>(),
-            query = DisneyQueries.ENTITLEMENTS,
-            authorization = accessToken,
-        )
-        val me = json["data"]?.get("me")?.takeIf { !it.isNull }
-            ?: throw ErrorLoadingException("Disney+ API: no se pudo obtener la cuenta")
-        accountCache = now to me
-        return me
+        return accountMutex.withLock {
+            val lockedNow = System.currentTimeMillis()
+            val lockedCached = accountCache
+            if (!force && lockedCached != null && lockedNow - lockedCached.first < 5 * 60 * 1000L) {
+                return@withLock lockedCached.second
+            }
+
+            refreshToken()
+            val endpoint = orchestrationEndpoint("query")
+            val json = graphql(
+                endpoint = endpoint,
+                operationName = "EntitledGraphMeQuery",
+                variables = emptyMap<String, Any>(),
+                query = DisneyQueries.ENTITLEMENTS,
+                authorization = accessToken,
+            )
+            val me = json["data"]?.get("me")?.takeIf { !it.isNull }
+                ?: throw ErrorLoadingException("Disney+ API: no se pudo obtener la cuenta")
+            accountCache = System.currentTimeMillis() to me
+            me
+        }
     }
 
     var profilePin: String?
@@ -444,13 +463,13 @@ class DisneyApi(private val prefs: SharedPreferences) {
     }
 
     /** Selects a profile when the session has no active profile yet. */
-    suspend fun ensureActiveProfile() {
+    suspend fun ensureActiveProfile() = profileMutex.withLock {
         val me = account()
-        val account = me["account"]?.takeIf { !it.isNull } ?: return
-        if (account["activeProfile"]?.takeIf { !it.isNull } != null) return
+        val account = me["account"]?.takeIf { !it.isNull } ?: return@withLock
+        if (account["activeProfile"]?.takeIf { !it.isNull } != null) return@withLock
         val profiles = account["profiles"]?.filter { !it.isNull } ?: emptyList()
-        val profile = pickProfile(profiles) ?: return
-        val profileId = profile["id"]?.asText() ?: return
+        val profile = pickProfile(profiles) ?: return@withLock
+        val profileId = profile["id"]?.asText() ?: return@withLock
         if (isPinProtected(profile) && profilePin.isNullOrBlank()) {
             throw ErrorLoadingException(
                 "Disney+ perfil protegido con PIN. Guárdalo en: Ajustes del proveedor -> Disney+ Login -> PIN de perfil."
@@ -544,6 +563,24 @@ class DisneyApi(private val prefs: SharedPreferences) {
             ?: throw ErrorLoadingException("Disney+ API: respuesta sin datos")
     }
 
+    private suspend fun explorePost(
+        pathHref: String,
+        body: Any,
+    ): JsonNode {
+        val ctx = profileContext()
+        val url = formatHref(pathHref, ctx, emptyMap())
+        val resp = app.post(
+            url,
+            headers = baseHeaders + ("authorization" to accessToken.orEmpty()),
+            json = body,
+        )
+        val json = mapper.readTree(resp.text)
+            ?: throw ErrorLoadingException("Disney+ API: respuesta vacía")
+        checkErrors(json)
+        return json["data"]?.takeIf { !it.isNull }
+            ?: throw ErrorLoadingException("Disney+ API: respuesta sin datos")
+    }
+
     private fun JsonNode.req(name: String): JsonNode =
         this[name]?.takeIf { !it.isNull }
             ?: throw ErrorLoadingException("Disney+ API: falta '$name' en la respuesta")
@@ -574,12 +611,53 @@ class DisneyApi(private val prefs: SharedPreferences) {
         return exploreGet(pathHref = href, params = mapOf("query" to query)).req("page")
     }
 
-    suspend fun getSet(setId: String, limit: Int = 100, page: Int = 1): JsonNode {
+    /** Live guide views; the ESPN hub is exposed as one or more of these views. */
+    suspend fun guideViews(): JsonNode {
+        val href = getConfig()["services"]["explore"]["client"]["endpoints"]["getGuideViews"]["href"].asText()
+        return exploreGet(pathHref = href).req("views")
+    }
+
+    /** Programs airing in [channelIds] between [startTime] and [endTime] (ISO-8601). */
+    suspend fun guideListings(
+        channelIds: List<String>,
+        startTime: String,
+        endTime: String,
+    ): JsonNode {
+        val href = getConfig()["services"]["explore"]["client"]["endpoints"]["getGuideListings"]["href"].asText()
+        return explorePost(
+            pathHref = href,
+            body = mapOf(
+                "startTime" to startTime,
+                "endTime" to endTime,
+                "channelIds" to channelIds,
+                "includeVisuals" to true,
+            ),
+        ).req("channels")
+    }
+
+    /**
+     * Fetches a page of a row/set.
+     *
+     * Disney's clients paginate sets with a cursor (`after`) taken from the previous
+     * response's `cursorPagination.next`. `offset` is kept as a fallback for clients
+     * that do not expose a cursor.
+     */
+    suspend fun getSet(
+        setId: String,
+        limit: Int = 20,
+        page: Int = 1,
+        after: String? = null,
+    ): JsonNode {
         val href = getConfig()["services"]["explore"]["client"]["endpoints"]["getSet"]["href"].asText()
+        val params = if (after.isNullOrBlank()) {
+            mapOf("limit" to limit.toString(), "offset" to (limit * (page - 1)).toString())
+        } else {
+            mapOf("limit" to limit.toString(), "after" to after)
+        }
         return exploreGet(
             pathHref = href,
             extraPath = mapOf("setId" to setId),
-            params = mapOf("limit" to limit.toString(), "offset" to (limit * (page - 1)).toString()),
+            params = params,
         ).req("set")
     }
 
@@ -605,6 +683,33 @@ class DisneyApi(private val prefs: SharedPreferences) {
         val vod = drm["widevineLicense"]["href"].asText()
         val linear = drm["widevineLinearLicense"]["href"].asText()
         return vod to linear
+    }
+
+    /**
+     * Resolves the Widevine license URL for a DRM endpoint key.
+     *
+     * Disney's config maps each DRM system and content type to an endpoint key in
+     * `services.drm.client.extras.licenseEndpoints`. For Widevine that mapping is:
+     *   event  -> widevineLicense        (/widevine/v1/obtain-license)
+     *   linear -> widevineLinearLicense  (/widevine/v1/channel/obtain-license)
+     *   vod    -> widevineLicense        (/widevine/v1/obtain-license)
+     *
+     * Live *events* report `security.drmEndpointKey = "event"`, so their challenge
+     * must go to the VOD-style obtain-license endpoint. Sending an event challenge
+     * to the linear-channel endpoint makes the license server answer
+     * `400 bad-license-request`, which ExoPlayer surfaces as
+     * ERROR_CODE_DRM_LICENSE_ACQUISITION_FAILED / MSE_ACQUISITION_FAILED.
+     */
+    suspend fun widevineLicenseUrl(drmEndpointKey: String?): String? {
+        val config = getConfig()
+        val drm = config["services"]["drm"]["client"]
+        val mapping = drm["extras"]?.get("licenseEndpoints")?.get("WIDEVINE")
+        val key = drmEndpointKey?.trim()?.lowercase()?.takeIf { it.isNotBlank() } ?: "vod"
+        val endpointName = mapping?.get(key)?.asText()?.takeIf { it.isNotBlank() }
+            ?: mapping?.get("vod")?.asText()?.takeIf { it.isNotBlank() }
+            ?: "widevineLicense"
+        return drm["endpoints"]?.get(endpointName)?.get("href")?.asText()?.takeIf { it.isNotBlank() }
+            ?: drm["endpoints"]?.get("widevineLicense")?.get("href")?.asText()
     }
 
     suspend fun playback(resourceId: String): JsonNode {

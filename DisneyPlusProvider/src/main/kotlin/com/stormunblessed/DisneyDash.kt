@@ -21,29 +21,63 @@ internal object DisneyDash {
 
     private data class Segment(val url: String, val durationMs: Long, val time: Long?)
 
+    private data class WidevineKey(
+        val pssh: String,
+        val kid: String?,
+        /** "cenc" for SAMPLE-AES-CTR, "cbcs" for SAMPLE-AES. */
+        val scheme: String,
+    )
+
     private data class Track(
         val initUrl: String,
         val segments: List<Segment>,
         val bandwidth: Long,
         val lang: String? = null,
+        val key: WidevineKey? = null,
+        /** #EXT-X-PROGRAM-DATE-TIME of the chosen section's first segment. */
+        val pdt: String? = null,
     )
 
-    suspend fun buildManifest(hlsUrl: String, preferredAudio: String?): String? {
-        val master = fetch(hlsUrl) ?: return null
+    private data class Section(
+        val initUrl: String,
+        val segments: List<Segment>,
+        val pdt: String?,
+    )
+
+    /** A built DASH manifest plus the live anchor values the provider must cache. */
+    data class BuiltManifest(
+        val xml: String,
+        val live: Boolean,
+        val availabilityStartTime: String? = null,
+        val presentationTimeOffset: Long? = null,
+    )
+
+    /**
+     * Everything needed to publish a live (dynamic) DASH manifest. The anchor values
+     * stay fixed for the whole presentation while the segment window slides forward.
+     */
+    private data class LiveConfig(
+        val availabilityStartTime: String,
+        val presentationTimeOffset: Long,
+        val timeShiftBufferDepthSeconds: String,
+        val minimumUpdatePeriodSeconds: String,
+    )
+
+    suspend fun buildManifest(
+        hlsUrl: String,
+        preferredAudio: String?,
+        direct: Boolean = false,
+        anchorStartTime: String? = null,
+        anchorTimeOffset: Long? = null,
+        windowSeconds: Long = LIVE_WINDOW_SECONDS,
+    ): BuiltManifest? {
+        val master = fetch(hlsUrl, direct) ?: return null
         val lines = master.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.toList()
 
-        var pssh: String? = null
-        var kid: String? = null
-        for (line in lines) {
-            if (!line.startsWith("#EXT-X-SESSION-KEY:")) continue
-            if (!line.contains(WIDEVINE_KEYFORMAT)) continue
-            val data = attr(line, "URI")?.substringAfter("base64,", "")?.trim().orEmpty()
-            if (data.isNotEmpty()) {
-                pssh = data
-                kid = parseKid(data)
-            }
-            break
-        }
+        // VOD masters carry #EXT-X-SESSION-KEY, but live/linear streams usually
+        // put the Widevine key in each media playlist instead. Keep the master key
+        // as a fallback and only mark tracks that actually carry one.
+        val masterKey = findWidevineKey(master)
 
         var variantUri: String? = null
         var audioGroup: String? = null
@@ -70,7 +104,12 @@ internal object DisneyDash {
         if (variantUri == null) return null
 
         val videoUrl = resolve(hlsUrl, variantUri)
-        val video = parseTrack(videoUrl, fetch(videoUrl) ?: return null, variantBandwidth) ?: return null
+        val videoText = fetch(videoUrl, direct) ?: return null
+        val live = !videoText.contains("#EXT-X-ENDLIST")
+        val videoKey = findWidevineKey(videoText) ?: masterKey
+        val video = parseTrack(videoUrl, videoText, variantBandwidth, keepLast = live)
+            ?.copy(key = videoKey)
+            ?: return null
 
         val audioLines = lines.filter {
             it.startsWith("#EXT-X-MEDIA:") &&
@@ -81,17 +120,42 @@ internal object DisneyDash {
         val audioTracks = audioLines.mapNotNull { line ->
             val uri = attr(line, "URI") ?: return@mapNotNull null
             val url = resolve(hlsUrl, uri)
-            val track = fetch(url)?.let { parseTrack(url, it, 128_000L) } ?: return@mapNotNull null
-            track.copy(lang = attr(line, "LANGUAGE"))
+            val text = fetch(url, direct) ?: return@mapNotNull null
+            val audioKey = findWidevineKey(text) ?: masterKey
+            val track = parseTrack(url, text, 128_000L, keepLast = !text.contains("#EXT-X-ENDLIST"))
+                ?.copy(lang = attr(line, "LANGUAGE"), key = audioKey)
+                ?: return@mapNotNull null
+            track
         }.sortedBy { audioPreference(it.lang, preferredAudio) }
 
-        return buildMpd(
-            video = video,
+        // For live playlists keep the anchor fixed for the whole presentation and
+        // slide the segment window so each refreshed manifest stays small.
+        val anchorPdt = if (live) anchorStartTime ?: video.pdt else null
+        val anchorTime = if (live) anchorTimeOffset ?: video.segments.firstOrNull()?.time else null
+        val windowVideo = if (live) trimToWindow(video, windowSeconds) else video
+        val windowAudio = if (live) audioTracks.map { trimToWindow(it, windowSeconds) } else audioTracks
+
+        val liveConfig = if (live && anchorTime != null) {
+            LiveConfig(
+                availabilityStartTime = anchorPdt ?: nowIso(),
+                presentationTimeOffset = anchorTime,
+                timeShiftBufferDepthSeconds = bufferDurationSeconds(windowVideo),
+                minimumUpdatePeriodSeconds = segmentDurationSeconds(windowVideo),
+            )
+        } else null
+
+        val xml = buildMpd(
+            video = windowVideo,
             videoCodecs = codecs,
             resolution = resolution,
-            audioTracks = audioTracks,
-            pssh = pssh,
-            kid = kid,
+            audioTracks = windowAudio,
+            live = liveConfig,
+        )
+        return BuiltManifest(
+            xml = xml,
+            live = live,
+            availabilityStartTime = liveConfig?.availabilityStartTime,
+            presentationTimeOffset = liveConfig?.presentationTimeOffset,
         )
     }
 
@@ -122,26 +186,50 @@ internal object DisneyDash {
         return out.toString()
     }
 
-    private suspend fun fetch(url: String): String? =
-        runCatching {
+    private suspend fun fetch(url: String, direct: Boolean = false): String? {
+        if (direct) return fetchDirect(url)
+        return runCatching {
             app.get(url, headers = mapOf("User-Agent" to DisneyConstants.userAgent())).text
         }.getOrNull()
+    }
 
-    private fun parseTrack(baseUrl: String, text: String, bandwidth: Long): Track? {
+    /**
+     * Fetches a playlist without going through the plugin's OkHttp client. Used when a
+     * live manifest must be rebuilt from inside [DisneyPlusProvider.getVideoInterceptor],
+     * where re-entering the same client would return the cached manifest instead of the
+     * real HLS playlist.
+     */
+    private fun fetchDirect(url: String): String? = runCatching {
+        val connection = java.net.URL(url).openConnection() as java.net.HttpURLConnection
+        connection.connectTimeout = 15_000
+        connection.readTimeout = 15_000
+        connection.setRequestProperty("User-Agent", DisneyConstants.userAgent())
+        connection.inputStream.bufferedReader().use { it.readText() }
+    }.getOrNull()
+
+    private fun parseTrack(baseUrl: String, text: String, bandwidth: Long, keepLast: Boolean = false): Track? {
         var sectionInit: String? = null
+        var sectionPdt: String? = null
         var pendingMs: Long? = null
+        var pendingPdt: String? = null
         var current = mutableListOf<Segment>()
-        val sections = mutableListOf<Pair<String, List<Segment>>>()
+        val sections = mutableListOf<Section>()
 
         for (raw in text.lineSequence()) {
             val line = raw.trim()
             when {
+                line.startsWith("#EXT-X-PROGRAM-DATE-TIME:") -> {
+                    if (pendingPdt == null) {
+                        pendingPdt = line.removePrefix("#EXT-X-PROGRAM-DATE-TIME:").trim()
+                    }
+                }
                 line.startsWith("#EXT-X-DISCONTINUITY") -> {
                     sectionInit?.let { init ->
-                        if (current.isNotEmpty()) sections.add(init to current)
+                        if (current.isNotEmpty()) sections.add(Section(init, current, sectionPdt))
                     }
                     current = mutableListOf()
                     sectionInit = null
+                    sectionPdt = null
                 }
                 line.startsWith("#EXT-X-MAP:") -> {
                     if (current.isEmpty()) {
@@ -157,21 +245,25 @@ internal object DisneyDash {
                 }
                 line.isNotEmpty() && !line.startsWith("#") -> {
                     val duration = pendingMs ?: continue
+                    if (sectionPdt == null) sectionPdt = pendingPdt
                     val url = resolve(baseUrl, line)
-                    val time = PTS_REGEX.find(url)?.groupValues?.get(1)?.toLongOrNull()
-                    current.add(Segment(url, duration, time))
+                    current.add(Segment(url, duration, segmentTime(url)))
                     pendingMs = null
                 }
             }
         }
         sectionInit?.let { init ->
-            if (current.isNotEmpty()) sections.add(init to current)
+            if (current.isNotEmpty()) sections.add(Section(init, current, sectionPdt))
         }
 
-        // Interstitials/ads create extra discontinuity sections with their own init
-        // and reset PTS. Keep the longest section (the actual title).
-        val best = sections.maxByOrNull { (_, segments) -> segments.sumOf { it.durationMs } } ?: return null
-        return Track(best.first, best.second, bandwidth)
+        // For live playlists the last discontinuity section is the current
+        // program; for VOD keep the longest section (the actual title).
+        val best = if (keepLast) {
+            sections.lastOrNull()
+        } else {
+            sections.maxByOrNull { it.segments.sumOf { s -> s.durationMs } }
+        } ?: return null
+        return Track(best.initUrl, best.segments, bandwidth, pdt = best.pdt)
     }
 
     private fun parseVttSections(baseUrl: String, text: String): List<List<Pair<String, Double>>> {
@@ -211,21 +303,30 @@ internal object DisneyDash {
         videoCodecs: String?,
         resolution: String?,
         audioTracks: List<Track>,
-        pssh: String?,
-        kid: String?,
+        live: LiveConfig? = null,
     ): String {
-        val duration = String.format(Locale.US, "PT%.3fS", videoDurationMs(video) / 1000.0)
         val (width, height) = parseResolution(resolution)
         val out = StringBuilder(48 * 1024)
         out.append("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n")
         out.append("<MPD xmlns=\"urn:mpeg:dash:schema:mpd:2011\" xmlns:cenc=\"urn:mpeg:cenc:2013\" ")
-        out.append("type=\"static\" mediaPresentationDuration=\"").append(duration).append("\" ")
-        out.append("minBufferTime=\"PT2S\" profiles=\"urn:mpeg:dash:profile:isoff-main:2011\">\n<Period>\n")
-        appendTrack(out, video, "video", "video/mp4", videoCodecs, width, height, null, pssh, kid, "video")
+        if (live != null) {
+            out.append("type=\"dynamic\" ")
+            out.append("availabilityStartTime=\"").append(live.availabilityStartTime).append("\" ")
+            out.append("publishTime=\"").append(nowIso()).append("\" ")
+            out.append("minimumUpdatePeriod=\"PT").append(live.minimumUpdatePeriodSeconds).append("S\" ")
+            out.append("timeShiftBufferDepth=\"PT").append(live.timeShiftBufferDepthSeconds).append("S\" ")
+            out.append("suggestedPresentationDelay=\"PT6S\" ")
+        } else {
+            val duration = String.format(Locale.US, "PT%.3fS", videoDurationMs(video) / 1000.0)
+            out.append("type=\"static\" mediaPresentationDuration=\"").append(duration).append("\" ")
+        }
+        out.append("minBufferTime=\"PT2S\" profiles=\"urn:mpeg:dash:profile:isoff-main:2011\">\n")
+        out.append(if (live != null) "<Period id=\"0\" start=\"PT0S\">\n" else "<Period>\n")
+        appendTrack(out, video, "video", "video/mp4", videoCodecs, width, height, null, video.key, "video", live)
         audioTracks.forEachIndexed { index, track ->
             appendTrack(
                 out, track, "audio", "audio/mp4", "mp4a.40.2",
-                null, null, track.lang, pssh, kid, "audio_$index",
+                null, null, track.lang, track.key, "audio_$index", live,
             )
         }
         out.append("</Period>\n</MPD>\n")
@@ -240,6 +341,39 @@ internal object DisneyDash {
         return ((end - firstTime) * 1000.0 / TIMESCALE).roundToLong()
     }
 
+    /** Median segment duration in seconds, used as the live minimumUpdatePeriod. */
+    private fun segmentDurationSeconds(track: Track): String {
+        val durations = track.segments.map { it.durationMs }.sorted()
+        val median = durations.getOrNull(durations.size / 2) ?: 6_000L
+        return String.format(Locale.US, "%.3f", median / 1000.0)
+    }
+
+    /** Full DVR window length in seconds, used as the live timeShiftBufferDepth. */
+    private fun bufferDurationSeconds(track: Track): String =
+        String.format(Locale.US, "%.3f", videoDurationMs(track) / 1000.0)
+
+    /** Current UTC time as an ISO-8601 instant, used as the live publishTime. */
+    private fun nowIso(): String =
+        java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US)
+            .apply { timeZone = java.util.TimeZone.getTimeZone("UTC") }
+            .format(java.util.Date())
+
+    /**
+     * Trims a live track down to its most recent [windowSeconds] seconds so the
+     * refreshed DASH manifest stays small. Timeline times are absolute, so the
+     * presentation anchor does not move when the window slides.
+     */
+    private fun trimToWindow(track: Track, windowSeconds: Long): Track {
+        if (windowSeconds <= 0) return track
+        val segments = track.segments
+        if (segments.size < 2) return track
+        val end = segments.last().time ?: return track
+        val cutoff = end - windowSeconds * TIMESCALE
+        val trimmed = segments.filter { (it.time ?: 0L) >= cutoff }
+        if (trimmed.size < 2) return track
+        return track.copy(segments = trimmed)
+    }
+
     private fun appendTrack(
         out: StringBuilder,
         track: Track,
@@ -249,9 +383,9 @@ internal object DisneyDash {
         width: Int?,
         height: Int?,
         lang: String?,
-        pssh: String?,
-        kid: String?,
+        key: WidevineKey?,
         id: String,
+        live: LiveConfig? = null,
     ) {
         out.append("<AdaptationSet contentType=\"").append(contentType)
             .append("\" mimeType=\"").append(mimeType).append('"')
@@ -261,12 +395,15 @@ internal object DisneyDash {
         lang?.takeIf { it.isNotBlank() }?.let { out.append(" lang=\"").append(escape(it)).append('"') }
         out.append(">\n")
 
-        if (kid != null) {
-            out.append("<ContentProtection schemeIdUri=\"urn:mpeg:dash:mp4protection:2011\" ")
-                .append("value=\"cbcs\" cenc:default_KID=\"").append(kid).append("\"/>\n")
-            out.append("<ContentProtection schemeIdUri=\"").append(WIDEVINE_KEYFORMAT).append("\" ")
-                .append("cenc:default_KID=\"").append(kid).append("\">")
-            pssh?.let { out.append("<cenc:pssh>").append(it).append("</cenc:pssh>") }
+        if (key != null) {
+            out.append("<ContentProtection schemeIdUri=\"urn:mpeg:dash:mp4protection:2011\" value=\"")
+                .append(key.scheme).append('"')
+            key.kid?.let { out.append(" cenc:default_KID=\"").append(it).append('"') }
+            out.append("/>\n")
+            out.append("<ContentProtection schemeIdUri=\"").append(WIDEVINE_KEYFORMAT).append('"')
+            key.kid?.let { out.append(" cenc:default_KID=\"").append(it).append('"') }
+            out.append('>')
+            out.append("<cenc:pssh>").append(key.pssh).append("</cenc:pssh>")
             out.append("</ContentProtection>\n")
         }
 
@@ -285,11 +422,19 @@ internal object DisneyDash {
         if (template != null) {
             out.append("<SegmentTemplate timescale=\"").append(timescale)
                 .append("\" initialization=\"").append(escape(track.initUrl))
-                .append("\" media=\"").append(escape(template)).append("\">\n")
+                .append("\" media=\"").append(escape(template)).append('"')
+            if (live != null) {
+                out.append(" presentationTimeOffset=\"").append(live.presentationTimeOffset).append('"')
+            }
+            out.append(">\n")
             appendTimeline(out, segments, timescale)
             out.append("</SegmentTemplate>\n")
         } else {
-            out.append("<SegmentList timescale=\"").append(timescale).append("\">\n")
+            out.append("<SegmentList timescale=\"").append(timescale).append('"')
+            if (live != null) {
+                out.append(" presentationTimeOffset=\"").append(live.presentationTimeOffset).append('"')
+            }
+            out.append(">\n")
             out.append("<Initialization sourceURL=\"").append(escape(track.initUrl)).append("\"/>\n")
             appendTimeline(out, segments, timescale)
             for (segment in segments) {
@@ -368,6 +513,22 @@ internal object DisneyDash {
         return parts[0].toIntOrNull() to parts[1].toIntOrNull()
     }
 
+    /** Finds the Widevine key (PSSH + KID) in an HLS master or media playlist. */
+    private fun findWidevineKey(playlist: String): WidevineKey? {
+        for (raw in playlist.lineSequence()) {
+            val line = raw.trim()
+            if (!line.startsWith("#EXT-X-KEY:") && !line.startsWith("#EXT-X-SESSION-KEY:")) continue
+            if (!line.contains(WIDEVINE_KEYFORMAT)) continue
+            val uri = attr(line, "URI") ?: continue
+            if (!uri.contains("base64,")) continue
+            val data = uri.substringAfter("base64,", "").trim()
+            if (data.isEmpty()) continue
+            val scheme = if (line.contains("SAMPLE-AES-CTR", ignoreCase = true)) "cenc" else "cbcs"
+            return WidevineKey(data, parseKid(data), scheme)
+        }
+        return null
+    }
+
     /** Widevine PSSH v0: size|"pssh"|ver|flags|systemId|dataSize|0x12 0x10|KID|data */
     private fun parseKid(psshBase64: String): String? {
         val bytes = runCatching { Base64.decode(psshBase64, Base64.DEFAULT) }.getOrNull() ?: return null
@@ -389,10 +550,31 @@ internal object DisneyDash {
         .replace(">", "&gt;")
 
     private val PTS_REGEX = Regex("pts_(\\d+)(?:\\.|$)")
+    private val TIMECODE_REGEX = Regex("/(\\d{2})/(\\d{2})/(\\d{2})_(\\d{3})\\.[A-Za-z0-9]+$")
     private val CUE_TIME = Regex("^\\d{2}:\\d{2}:\\d{2}\\.\\d{3}\\s+-->.*")
+
+    /**
+     * Media time of a segment in 48 kHz ticks. Disney uses two URL shapes:
+     * `pts_<ticks>.mp4` and wall-clock timecodes like `309/04/59/56_387.mp4`
+     * (HH/MM/SS_mmm). The timecode form is converted to ticks since midnight so
+     * the DASH timeline stays stable across live manifest refreshes.
+     */
+    private fun segmentTime(url: String): Long? {
+        PTS_REGEX.find(url)?.groupValues?.get(1)?.toLongOrNull()?.let { return it }
+        val match = TIMECODE_REGEX.find(url) ?: return null
+        val hours = match.groupValues[1].toLongOrNull() ?: return null
+        val minutes = match.groupValues[2].toLongOrNull() ?: return null
+        val seconds = match.groupValues[3].toLongOrNull() ?: return null
+        val millis = match.groupValues[4].toLongOrNull() ?: return null
+        val totalMs = ((hours * 60 + minutes) * 60 + seconds) * 1000 + millis
+        return totalMs * TIMESCALE / 1000
+    }
 
     private const val WIDEVINE_KEYFORMAT = "urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed"
 
     /** Disney CMAF segments use a 48 kHz media timescale. */
     private const val TIMESCALE = 48000
+
+    /** How much DVR history to keep in a refreshed live manifest. */
+    private const val LIVE_WINDOW_SECONDS = 300L
 }

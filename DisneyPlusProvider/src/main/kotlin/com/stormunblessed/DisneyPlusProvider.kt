@@ -32,7 +32,15 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Protocol
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
+import android.util.Base64
+import android.util.Log
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.runBlocking
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
 import java.util.UUID
 
 class DisneyPlusProvider(private val api: DisneyApi) : MainAPI() {
@@ -50,8 +58,21 @@ class DisneyPlusProvider(private val api: DisneyApi) : MainAPI() {
 
     private val mapper = ObjectMapper()
 
-    /** HLS master URL -> generated DASH manifest, served by [getVideoInterceptor]. */
-    private val dashManifests = java.util.concurrent.ConcurrentHashMap<String, String>()
+    /**
+     * A DASH manifest served by [getVideoInterceptor]. Live entries are rebuilt from
+     * the HLS playlist on each refresh so ExoPlayer always sees the current live edge.
+     */
+    private data class DashSource(
+        val hlsUrl: String,
+        val preferredAudio: String?,
+        val live: Boolean,
+        val xml: String,
+        val builtAt: Long,
+        val availabilityStartTime: String? = null,
+        val presentationTimeOffset: Long? = null,
+    )
+
+    private val dashManifests = java.util.concurrent.ConcurrentHashMap<String, DashSource>()
 
     /** Subtitle proxy URL -> HLS subtitle playlist, served by [getVideoInterceptor]. */
     private val subtitleSources = java.util.concurrent.ConcurrentHashMap<String, String>()
@@ -61,14 +82,33 @@ class DisneyPlusProvider(private val api: DisneyApi) : MainAPI() {
         private val WIDEVINE_UUID: UUID = UUID.fromString("edef8ba9-79d6-4ace-a3c8-27dcd51d21ed")
         private const val LOGIN_REQUIRED = "Disney+ requiere una cuenta con suscripción activa. " +
             "Inicia sesión en: Ajustes del proveedor (icono de engranaje) -> Disney+ Login."
+        private const val ROW_LIMIT = 20
+
+        /** ESPN shelves are larger than normal rows; load enough to include live events. */
+        private const val ESPN_LIMIT = 25
+        private const val ENHANCED_LIMIT = 25
+
+        /** Minimum delay between live manifest rebuilds, in milliseconds. */
+        private const val LIVE_REFRESH_MS = 3_000L
     }
 
+    /** One paginable row of a Disney+ page, backed by an Explore set. */
+    private data class ShelfRef(
+        val name: String,
+        val setId: String?,
+        val cursor: String?,
+        val hasMore: Boolean,
+    )
+
+    /** Row refs and cursors for the last page-1 load of each tab. */
+    private val shelfRefs = java.util.concurrent.ConcurrentHashMap<String, List<ShelfRef>>()
+
     override val mainPage: List<MainPageData> = mainPageOf(
+        "ESPN" to "espn",
         "Inicio" to "home",
         "Películas" to "movies",
         "Series" to "series",
         "Originales" to "originals",
-        "ESPN" to "espn",
     )
 
     private fun requireLogin() {
@@ -77,14 +117,33 @@ class DisneyPlusProvider(private val api: DisneyApi) : MainAPI() {
         }
     }
 
-    private fun getActions(item: JsonNode): Map<String, JsonNode> {
+    private fun getActions(item: JsonNode, depth: Int = 0): Map<String, JsonNode> {
         val actions = linkedMapOf<String, JsonNode>()
         val arr = item["actions"] ?: return actions
         for (row in arr) {
-            when (row["type"]?.asText()) {
-                "playback" -> actions["playback"] = row
-                "browse" -> actions["browse"] = row
-                "modal" -> actions["modal"] = row
+            val type = row["type"]?.asText()?.lowercase()
+            when {
+                type in setOf("playback", "play", "watch", "tune", "resume") ->
+                    if (actions["playback"] == null) actions["playback"] = row
+                type in setOf("browse", "page") ->
+                    if (actions["browse"] == null) actions["browse"] = row
+                type == "modal" || type == "upsell" || row["modalType"] != null -> {
+                    if (actions["modal"] == null) actions["modal"] = row
+                    // Modal actions wrap their own action list, which is where the
+                    // real playback action lives (same as Disney's clients).
+                    if (depth < 3) {
+                        val nested = getActions(row, depth + 1)
+                        if (actions["playback"] == null) nested["playback"]?.let { actions["playback"] = it }
+                        if (actions["browse"] == null) nested["browse"]?.let { actions["browse"] = it }
+                    }
+                    if (actions["playback"] == null && row["resourceId"] != null) {
+                        actions["playback"] = row
+                    }
+                }
+                // Live event actions often omit `type` and only carry the playback
+                // fields directly.
+                row["resourceId"] != null ->
+                    if (actions["playback"] == null) actions["playback"] = row
             }
         }
         val fallback = actions["browse"] ?: actions["modal"]
@@ -101,8 +160,29 @@ class DisneyPlusProvider(private val api: DisneyApi) : MainAPI() {
         return out
     }
 
+    /** Some guide responses key channels/views by id instead of returning an array. */
+    private fun JsonNode?.objectValues(): List<JsonNode> {
+        if (this == null || !isObject) return emptyList()
+        val out = mutableListOf<JsonNode>()
+        forEach { out.add(it) }
+        return out
+    }
+
     private fun JsonNode?.textOrNull(): String? =
         this?.takeIf { !it.isNull }?.asText()?.takeIf { it.isNotBlank() && it != "null" }
+
+    /**
+     * Guide payloads wrap labels as objects (`{"text": "ESPN"}`) while other
+     * endpoints use plain strings. Read whichever form is present.
+     */
+    private fun JsonNode?.labelText(): String? {
+        if (this == null || isNull) return null
+        if (isTextual) return asText().takeIf { it.isNotBlank() && it != "null" }
+        return this["text"].textOrNull()
+            ?: this["name"].textOrNull()
+            ?: this["title"].textOrNull()
+            ?: asText().takeIf { it.isNotBlank() && it != "null" }
+    }
 
     /** Content deeplink ids already carry the `entity-` prefix; don't add it twice. */
     private fun pageIdFor(deeplinkId: String): String =
@@ -141,6 +221,7 @@ class DisneyPlusProvider(private val api: DisneyApi) : MainAPI() {
     private fun posterUrl(visuals: JsonNode?): String? =
         artworkUrl(visuals, "standard", "tile", "0.71")
             ?: artworkUrl(visuals, "standard", "tile", "0.67")
+            ?: artworkUrl(visuals, "standard", "tile", "1.78")
             ?: artworkUrl(visuals, "standard", "thumbnail", "1.78")
             ?: artworkUrl(visuals, "hero", "background", "0.67")
 
@@ -150,8 +231,28 @@ class DisneyPlusProvider(private val api: DisneyApi) : MainAPI() {
             ?: artworkUrl(visuals, "standard", "background", "1.78")
             ?: artworkUrl(visuals, "standard", "background", "1.33")
 
+    private fun isLiveEventState(state: JsonNode?): Boolean {
+        if (state == null || state.isNull) return false
+        if (state.isTextual) {
+            val text = state.asText().lowercase()
+            return text.contains("live") || text.contains("progress")
+        }
+        val text = state["state"].textOrNull()?.lowercase()
+            ?: state["status"].textOrNull()?.lowercase()
+            ?: state["eventState"].textOrNull()?.lowercase()
+        if (text == null) {
+            // Some payloads only carry the live timeline.
+            return state["timeline"] != null
+        }
+        return text.contains("live") || text.contains("progress") || text == "on_air"
+    }
+
     private fun mediaType(visuals: JsonNode): TvType {
-        if (visuals["badging"]?.get("airingEventState") != null) return TvType.Live
+        val eventState = visuals["badging"]?.get("airingEventState")
+            ?: visuals["airingEventState"]
+        if (isLiveEventState(eventState)) return TvType.Live
+        val contentType = visuals["contentType"]?.asText()?.lowercase()
+        if (contentType == "live" || contentType == "linear") return TvType.Live
         return when (visuals["type"]?.asText()) {
             "Program", "TvShow", "Series" -> TvType.TvSeries
             else -> TvType.Movie
@@ -161,15 +262,45 @@ class DisneyPlusProvider(private val api: DisneyApi) : MainAPI() {
     private fun toSearchResponse(item: JsonNode): SearchResponse? {
         val visuals = item["visuals"] ?: return null
         val title = visuals["title"]?.asText() ?: visuals["name"]?.asText() ?: return null
-        val play = getActions(item)["playback"] ?: return null
+        val eventState = visuals["badging"]?.get("airingEventState")
+            ?: visuals["airingEventState"]
+            ?: item["airingEventState"]
+        // Skip scheduled upcoming broadcast tiles that have not started and have no playback.
+        if (eventState != null && !isLiveEventState(eventState) && !hasPlaybackAction(item)) {
+            return null
+        }
+
+        val actions = getActions(item)
+        val play = actions["playback"] ?: return null
+        val browse = actions["browse"]
         val deeplinkId = play["deeplinkId"].textOrNull()
         val contentId = play["legacyPartnerFeed"]?.get("dmcContentId").textOrNull()
             ?: play["partnerFeed"]?.get("dmcContentId").textOrNull()
-        val ref = deeplinkId ?: contentId ?: return null
-        val payload = mutableMapOf<String, String>("deeplinkId" to ref)
-        play["pageId"].textOrNull()?.let { payload["pageId"] = it }
+        val resourceId = play["resourceId"].textOrNull()
+        val pageId = play["pageId"].textOrNull()
+            ?: browse?.get("pageId").textOrNull()
+            ?: browse?.get("deeplinkId").textOrNull()?.takeIf {
+                it.startsWith("entity-") || it.startsWith("page-")
+            }
+        if (deeplinkId == null && contentId == null && resourceId == null && pageId == null) return null
+
+        val isLive = isLivePlayable(item)
+        val payload = mutableMapOf<String, String>()
+        (deeplinkId ?: contentId)?.let { payload["deeplinkId"] = it }
+        resourceId?.let { payload["resourceId"] = it }
+        (play["contentType"].textOrNull() ?: item["contentType"].textOrNull())
+            ?.let { payload["contentType"] = it }
+        pageId?.let { payload["pageId"] = it }
+        // Live events and channel tiles may use a channelId as deeplinkId with no entity
+        // page. Always include title/poster on live items so load() has full fallback metadata.
+        if (isLive || (deeplinkId == null && contentId == null)) {
+            payload["title"] = title
+            posterUrl(visuals)?.let { payload["poster"] = it }
+        }
+
         val url = mapper.writeValueAsString(payload)
-        return newMovieSearchResponse(title, url, mediaType(visuals)) {
+        val type = if (isLive) TvType.Live else mediaType(visuals)
+        return newMovieSearchResponse(title, url, type) {
             this.posterUrl = posterUrl(visuals)
         }
     }
@@ -181,71 +312,523 @@ class DisneyPlusProvider(private val api: DisneyApi) : MainAPI() {
         // The home screen loads every tab at once and fails as a whole if one throws.
         // A tab that is not available for this account/region must not break the rest.
         val rows = try {
-            loadRows(refId, isEspn)
+            loadRows(refId, isEspn, page)
         } catch (e: Exception) {
             if (refId == "home") throw e
             emptyList()
         }
-        return newHomePageResponse(rows, false)
+        // ESPN is a live hub, not a paged catalogue.
+        val hasNext = !isEspn && rows.any { it.list.isNotEmpty() } &&
+            shelfRefs[refId]?.any { it.hasMore } == true
+        return newHomePageResponse(rows, hasNext)
     }
 
-    private suspend fun loadRows(refId: String, isEspn: Boolean): List<HomePageList> {
-        val deeplink = api.deeplink(refId)
-        val browse = deeplink["actions"]?.firstOrNull { it["type"]?.asText() == "browse" }
-            ?: throw ErrorLoadingException("Disney+ no devolvió acción browse para '$refId'")
-        val pageId = browse["pageId"]?.asText()
+    private fun browsePageId(deeplink: JsonNode): String? =
+        deeplink["actions"]?.firstOrNull {
+            it["type"]?.asText() == "browse" && it["pageId"] != null
+        }?.get("pageId")?.asText()
+            ?: deeplink["actions"]?.firstOrNull { it["pageId"] != null }?.get("pageId")?.asText()
+
+    private suspend fun resolvePageId(refId: String): String =
+        browsePageId(api.deeplink(refId))
             ?: throw ErrorLoadingException("Disney+ sin pageId para '$refId'")
-        // `limit` is the number of items per row, not the number of rows.
-        val pageJson = api.page(pageId, limit = 20, enhancedLimit = 99)
 
-        val containers = pageJson["containers"].nodeList().filter {
-            isShelf(it, includeHero = isEspn)
-        }
-
+    private suspend fun loadRows(
+        refId: String,
+        isEspn: Boolean,
+        page: Int,
+    ): List<HomePageList> {
         if (isEspn) {
-            // ESPN exposes many shelves; collapse them into a single "live now" row.
-            // Only keep items with a real playback action: the rest are promos or
-            // require an ESPN subscription and would fail with "no links found".
-            val live = linkedMapOf<String, SearchResponse>()
-            val playable = linkedMapOf<String, SearchResponse>()
-            for (container in containers) {
-                for (item in container["items"].nodeList()) {
-                    if (!hasPlaybackAction(item)) continue
-                    val parsed = toSearchResponse(item) ?: continue
-                    playable.putIfAbsent(parsed.url, parsed)
-                    if (isLivePlayable(item)) live.putIfAbsent(parsed.url, parsed)
-                }
+            if (page > 1) return emptyList()
+            Log.i("DisneyESPN", "loadRows(espn) start, page=$page")
+            // Combine both sources concurrently: the hub page carries real event cards
+            // while the live guide knows about linear channels the page does not list
+            // as events. Hub-page entries win a title clash: they open the richer page.
+            val (pageResult, guideResult) = coroutineScope {
+                val pageDeferred = async { runCatching { loadEspnPageEvents() } }
+                val guideDeferred = async { runCatching { loadEspnGuideEvents() } }
+                pageDeferred.await() to guideDeferred.await()
             }
-            val events = if (live.isNotEmpty()) live.values.toList() else playable.values.toList()
-            return if (events.isEmpty()) emptyList() else listOf(HomePageList("ESPN En Vivo", events, false))
+            pageResult.exceptionOrNull()?.let {
+                Log.e("DisneyESPN", "loadEspnPageEvents failed: ${it.javaClass.simpleName}: ${it.message}")
+            }
+            val (pageLive, pagePlayable) = pageResult.getOrDefault(emptyList<SearchResponse>() to emptyList())
+            Log.i("DisneyESPN", "page events: live=${pageLive.size} playable=${pagePlayable.size}")
+
+            guideResult.exceptionOrNull()?.let {
+                Log.e("DisneyESPN", "loadEspnGuideEvents failed: ${it.javaClass.simpleName}: ${it.message}")
+            }
+            val guideEvents = guideResult.getOrDefault(emptyList())
+            Log.i("DisneyESPN", "guide events: ${guideEvents.size}")
+
+            val events = linkedMapOf<String, SearchResponse>()
+            pageLive.forEach { events.putIfAbsent(espnDedupeKey(it), it) }
+            guideEvents.forEach { events.putIfAbsent(espnDedupeKey(it), it) }
+            Log.i("DisneyESPN", "merged events: ${events.size}")
+            if (events.isNotEmpty()) {
+                return listOf(HomePageList("ESPN En Vivo", events.values.toList(), false))
+            }
+            // Nothing live anywhere: fall back to the full page catalogue so the tab
+            // is not empty (kept separate from the large playable set otherwise).
+            val fallback = linkedMapOf<String, SearchResponse>()
+            pagePlayable.forEach { fallback.putIfAbsent(espnDedupeKey(it), it) }
+            Log.i("DisneyESPN", "fallback playable events: ${fallback.size}")
+            return if (fallback.isEmpty()) {
+                emptyList()
+            } else {
+                listOf(HomePageList("ESPN", fallback.values.toList(), false))
+            }
         }
+
+        val pageId = resolvePageId(refId)
+        if (page <= 1) {
+            val pageJson = api.page(pageId, limit = ROW_LIMIT, enhancedLimit = ENHANCED_LIMIT)
+            return loadFirstPage(refId, pageJson)
+        }
+
+        return loadNextPage(refId, pageId, page)
+    }
+
+    private fun loadFirstPage(refId: String, pageJson: JsonNode): List<HomePageList> {
+        val rows = mutableListOf<HomePageList>()
+        val refs = mutableListOf<ShelfRef>()
+        for (container in pageJson["containers"].nodeList()) {
+            if (!isShelf(container)) continue
+            val name = container["visuals"]?.get("name")?.asText() ?: refId
+            val rawItems = container["items"].nodeList()
+            // Keep the first batch at ROW_LIMIT so the next page can use offset
+            // consistently even when the server ignores the limit parameter.
+            val items = if (rawItems.size > ROW_LIMIT) rawItems.subList(0, ROW_LIMIT) else rawItems
+            val parsed = items.mapNotNull { toSearchResponse(it) }
+            if (parsed.isEmpty()) continue
+
+            val setId = container["id"].textOrNull()
+            // The Android Explore API reports row pagination as `pagination.hasMore`;
+            // the web client uses `cursorPagination.next`. Support both, and fall
+            // back to "row is full" when neither is present.
+            val cursor = container["cursorPagination"]?.get("next").textOrNull()
+            val hasMore = setId != null && when {
+                cursor != null -> true
+                container["pagination"] != null ->
+                    container["pagination"]["hasMore"]?.asBoolean(false) == true
+                else -> rawItems.size >= ROW_LIMIT
+            }
+            refs.add(ShelfRef(name, setId, cursor, hasMore))
+            rows.add(HomePageList(name, parsed, false))
+        }
+        shelfRefs[refId] = refs
+        return rows
+    }
+
+    private suspend fun loadNextPage(
+        refId: String,
+        pageId: String,
+        page: Int,
+    ): List<HomePageList> {
+        // If the provider was recreated between page 1 and page 2, rebuild the row
+        // list from the page metadata. Subsequent requests then use offsets.
+        val refs = shelfRefs[refId] ?: run {
+            val pageJson = api.page(pageId, limit = 1, enhancedLimit = ENHANCED_LIMIT)
+            pageJson["containers"].nodeList()
+                .filter { isShelf(it) }
+                .mapNotNull { container ->
+                    val setId = container["id"].textOrNull() ?: return@mapNotNull null
+                    val name = container["visuals"]?.get("name")?.asText() ?: refId
+                    ShelfRef(name, setId, null, true)
+                }
+        }
+
+        if (refs.isEmpty()) return emptyList()
 
         val rows = mutableListOf<HomePageList>()
-        for (container in containers) {
-            val name = container["visuals"]?.get("name")?.asText() ?: refId
-            val parsed = container["items"].nodeList().mapNotNull { toSearchResponse(it) }
-            if (parsed.isNotEmpty()) rows.add(HomePageList(name, parsed, false))
+        val updated = mutableListOf<ShelfRef>()
+        for (ref in refs) {
+            if (!ref.hasMore) {
+                rows.add(HomePageList(ref.name, emptyList(), false))
+                updated.add(ref)
+                continue
+            }
+
+            val setId = ref.setId
+            if (setId == null) {
+                updated.add(ref.copy(hasMore = false, cursor = null))
+                rows.add(HomePageList(ref.name, emptyList(), false))
+                continue
+            }
+
+            // Prefer the cursor returned by the previous batch. If the cursor call
+            // fails (older endpoints), fall back to offset pagination.
+            var setJson = ref.cursor?.takeIf { it.isNotBlank() }?.let { cursor ->
+                runCatching {
+                    api.getSet(setId, limit = ROW_LIMIT, page = page, after = cursor)
+                }.getOrNull()
+            }
+            if (setJson == null) {
+                setJson = runCatching {
+                    api.getSet(setId, limit = ROW_LIMIT, page = page)
+                }.getOrNull()
+            }
+            if (setJson == null) {
+                updated.add(ref.copy(hasMore = false, cursor = null))
+                rows.add(HomePageList(ref.name, emptyList(), false))
+                continue
+            }
+
+            val rawItems = setJson["items"].nodeList()
+            val items = if (rawItems.size > ROW_LIMIT) rawItems.subList(0, ROW_LIMIT) else rawItems
+            val cursor = setJson["cursorPagination"]?.get("next").textOrNull()
+            val setHasMore = when {
+                cursor != null -> true
+                setJson["pagination"] != null ->
+                    setJson["pagination"]["hasMore"]?.asBoolean(false) == true
+                else -> rawItems.size >= ROW_LIMIT
+            }
+            updated.add(ref.copy(cursor = cursor, hasMore = setHasMore))
+
+            val parsed = items.mapNotNull { toSearchResponse(it) }
+            // Keep empty rows in the response so CloudStream updates hasNext for
+            // rows that are already exhausted as well.
+            rows.add(HomePageList(ref.name, parsed, false))
         }
+        shelfRefs[refId] = updated
         return rows
+    }
+
+    /** Dedupe key so a guide program and its hub-page card collapse into one entry. */
+    private fun espnDedupeKey(response: SearchResponse): String =
+        response.name.trim().lowercase(Locale.US)
+
+    /**
+     * Event cards from the ESPN hub page, split into live events and the full
+     * playable set (used only when nothing is live anywhere).
+     */
+    private suspend fun loadEspnPageEvents(): Pair<List<SearchResponse>, List<SearchResponse>> {
+        val triedPageIds = mutableSetOf<String>()
+        val candidates = listOf(
+            "espn",
+            "espn-hub",
+            "brand-espn",
+            "espn-plus",
+            "sports",
+            // Public ESPN browse page id (es-419 / es-mx). Last resort when the account's
+            // API does not expose an `espn` deeplink.
+            "page-15961e0d-00e3-4ff5-90b1-eb71a0f9457c",
+        )
+        for (candidate in candidates) {
+            val pageId = if (candidate.startsWith("page-")) {
+                candidate
+            } else {
+                runCatching { browsePageId(api.deeplink(candidate)) }.getOrNull()
+            }?.takeIf { it.isNotBlank() && triedPageIds.add(it) } ?: continue
+
+            Log.i("DisneyESPN", "trying pageId=$pageId (from $candidate)")
+            val pageResult = runCatching {
+                api.page(pageId, limit = ESPN_LIMIT, enhancedLimit = ENHANCED_LIMIT)
+            }
+            val pageJson = pageResult.getOrNull()
+            if (pageJson == null) {
+                Log.w("DisneyESPN", "page $pageId failed: ${pageResult.exceptionOrNull()?.message}")
+                continue
+            }
+            val live = linkedMapOf<String, SearchResponse>()
+            val playable = linkedMapOf<String, SearchResponse>()
+            runCatching { collectEspnEvents(pageJson, live, playable, depth = 0) }
+                .exceptionOrNull()?.let {
+                    Log.e("DisneyESPN", "collectEspnEvents threw: ${it.javaClass.simpleName}: ${it.message}")
+                }
+            Log.i("DisneyESPN", "collect done: live=${live.size} playable=${playable.size}")
+            if (live.isNotEmpty() || playable.isNotEmpty()) {
+                return live.values.toList() to playable.values.toList()
+            }
+        }
+        Log.w("DisneyESPN", "no page events found for any pageId")
+        return emptyList<SearchResponse>() to emptyList()
+    }
+
+    /**
+     * ESPN marketing pages mix event cards with navigation tiles. Event cards can
+     * live directly in `items`, under nested `children`, or inside the set behind a
+     * menu row. Walk one level deep so the live events are actually reached.
+     */
+    private suspend fun collectEspnEvents(
+        node: JsonNode,
+        live: MutableMap<String, SearchResponse>,
+        playable: MutableMap<String, SearchResponse>,
+        depth: Int,
+    ) {
+        // A leaf event card (not a row/container, which also has actions/visuals).
+        val isContainer = node["type"]?.asText() == "set" ||
+            node["items"] != null || node["containers"] != null ||
+            node["children"] != null
+        if (!isContainer && node["actions"] != null && node["visuals"] != null) {
+            if (isEspnEvent(node)) {
+                val parsed = toSearchResponse(node)
+                if (parsed != null) {
+                    playable.putIfAbsent(parsed.url, parsed)
+                    if (isLivePlayable(node)) live.putIfAbsent(parsed.url, parsed)
+                }
+            }
+            return
+        }
+
+        val containers = node["containers"].nodeList()
+        if (containers.isEmpty()) {
+            for (item in node["items"].nodeList()) {
+                collectEspnEvents(item, live, playable, depth)
+            }
+            for (child in node["children"].nodeList()) {
+                collectEspnEvents(child, live, playable, depth)
+            }
+            return
+        }
+
+        for (container in containers) {
+            val style = container["style"]?.get("name")?.asText() ?: ""
+            if (style.contains("logo_round", true) || style.contains("brand", true)) continue
+
+            val setId = container["id"].textOrNull()
+            var items = container["items"].nodeList()
+            var fetchedSet = false
+
+            // Only paginate beyond the initial ESPN_LIMIT batch if the batch is full of
+            // live events (live items always appear at the start of ESPN shelves).
+            val hasMore = container["pagination"]?.get("hasMore")?.asBoolean(false) == true ||
+                container["cursorPagination"]?.get("next").textOrNull() != null
+            if (setId != null && hasMore && items.isNotEmpty() && isLivePlayable(items.last())) {
+                val collected = items.toMutableList()
+                var cursor = container["cursorPagination"]?.get("next").textOrNull()
+                var pageNo = 2
+                while (pageNo <= 5) {
+                    val setJson = runCatching {
+                        api.getSet(setId, limit = ESPN_LIMIT, page = pageNo, after = cursor)
+                    }.getOrNull() ?: break
+                    val newItems = setJson["items"].nodeList()
+                    if (newItems.isEmpty()) break
+                    collected.addAll(newItems)
+                    fetchedSet = true
+                    val next = setJson["cursorPagination"]?.get("next").textOrNull()
+                    val more = (next != null ||
+                        setJson["pagination"]?.get("hasMore")?.asBoolean(false) == true) &&
+                        isLivePlayable(newItems.last())
+                    if (!more) break
+                    cursor = next
+                    pageNo++
+                }
+                items = collected
+            }
+
+            for (item in items) {
+                if (!isEspnEvent(item)) continue
+                val parsed = toSearchResponse(item) ?: continue
+                playable.putIfAbsent(parsed.url, parsed)
+                if (isLivePlayable(item)) {
+                    live.putIfAbsent(parsed.url, parsed)
+                }
+            }
+
+            // Marketing components often nest event cards under `children`.
+            for (child in container["children"].nodeList()) {
+                collectEspnEvents(child, live, playable, depth)
+            }
+
+            // Unhydrated container with no inline items: fetch its first page once.
+            if (items.isEmpty() && setId != null && depth < 1 && !fetchedSet) {
+                val setJson = runCatching {
+                    api.getSet(setId, limit = ESPN_LIMIT, page = 1)
+                }.getOrNull()
+                if (setJson != null) {
+                    collectEspnEvents(setJson, live, playable, depth + 1)
+                }
+            }
+        }
+
+        // Some marketing pages keep components at the page level in `children`.
+        for (child in node["children"].nodeList()) {
+            collectEspnEvents(child, live, playable, depth)
+        }
+    }
+
+    /**
+     * Programs currently airing on the ESPN linear channels, as returned by the live
+     * guide. Empty when the account/region exposes no guide.
+     */
+    private suspend fun loadEspnGuideEvents(): List<SearchResponse> {
+        val views = runCatching { api.guideViews() }.getOrNull()
+        if (views == null) {
+            Log.w("DisneyESPN", "guideViews failed")
+            return emptyList()
+        }
+        val channelIds = espnChannelIds(views)
+        Log.i("DisneyESPN", "guide channelIds=${channelIds.size} $channelIds")
+        if (channelIds.isEmpty()) return emptyList()
+
+        val (start, end) = guideTimeWindow()
+        val channels = runCatching {
+            api.guideListings(channelIds, start, end)
+        }.getOrNull() ?: return emptyList()
+
+        val now = System.currentTimeMillis()
+        val live = linkedMapOf<String, SearchResponse>()
+        for (channelId in channelIds) {
+            for (program in channels[channelId].nodeList()) {
+                val startTime = guideTime(program["startTime"].textOrNull()) ?: continue
+                val endTime = guideTime(program["endTime"].textOrNull())
+                    ?: (startTime + 3 * 60 * 60 * 1000L)
+                if (startTime > now || endTime <= now) continue
+                val parsed = toGuideSearchResponse(program, channelId) ?: continue
+                live.putIfAbsent(parsed.url, parsed)
+            }
+        }
+        return live.values.toList()
+    }
+
+    /** Finds ESPN channels in the guide views (es-MX uses "ESPN" / "ESPN 2"). */
+    private fun espnChannelIds(views: JsonNode): List<String> {
+        val espn = linkedSetOf<String>()
+        val sports = linkedSetOf<String>()
+        for (view in views.nodeList().ifEmpty { views.objectValues() }) {
+            val viewName = view["name"].labelText()
+                ?: view["visuals"]?.get("name").labelText()
+                ?: view["id"].labelText()
+                ?: ""
+            val viewIsSports = viewName.contains("espn", true) ||
+                viewName.contains("deporte", true) ||
+                viewName.contains("sport", true) ||
+                viewName.contains("live", true) ||
+                viewName.contains("vivo", true)
+
+            val channels = view["channels"].nodeList()
+                .ifEmpty { view["channels"].objectValues() }
+                .ifEmpty { view["visuals"]?.get("channels").nodeList() }
+                .ifEmpty { view["visuals"]?.get("channels").objectValues() }
+            for (channel in channels) {
+                val id = channel["id"].textOrNull() ?: continue
+                val name = channel["name"].labelText()
+                    ?: channel["visuals"]?.get("name").labelText()
+                    ?: ""
+                when {
+                    name.contains("espn", true) || id.contains("espn", true) -> espn.add(id)
+                    viewIsSports -> sports.add(id)
+                }
+            }
+        }
+        // Prefer actual ESPN channels; fall back to the wider sports view only
+        // when the guide does not label the ESPN channels directly.
+        return (if (espn.isNotEmpty()) espn else sports).toList()
+    }
+
+    private fun guideTimeWindow(hours: Int = 6): Pair<String, String> {
+        val start = Date()
+        val end = Date(start.time + hours * 60 * 60 * 1000L)
+        return guideTimeFormat(start) to guideTimeFormat(end)
+    }
+
+    private fun guideTimeFormat(date: Date): String {
+        val format = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US)
+        format.timeZone = TimeZone.getTimeZone("UTC")
+        return format.format(date)
+    }
+
+    private fun guideTime(value: String?): Long? {
+        if (value.isNullOrBlank()) return null
+        val patterns = listOf(
+            "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
+            "yyyy-MM-dd'T'HH:mm:ss'Z'",
+            "yyyy-MM-dd'T'HH:mm:ssXXX",
+        )
+        for (pattern in patterns) {
+            val parsed = runCatching {
+                val format = SimpleDateFormat(pattern, Locale.US)
+                format.timeZone = TimeZone.getTimeZone("UTC")
+                format.parse(value)?.time
+            }.getOrNull()
+            if (parsed != null) return parsed
+        }
+        return null
+    }
+
+    private fun toGuideSearchResponse(program: JsonNode, channelId: String): SearchResponse? {
+        val visuals = program["visuals"] ?: return null
+        val title = visuals["title"].labelText()
+            ?: visuals["name"].labelText()
+            ?: program["title"].labelText()
+            ?: return null
+        // The guide program id is a composite analytics id, not a playback id.
+        // Linear playback is resolved from the channel itself.
+        val payload = mutableMapOf<String, String>(
+            "deeplinkId" to channelId,
+            "resourceId" to channelId,
+            "contentType" to "live",
+            "title" to title,
+        )
+        posterUrl(visuals)?.let { payload["poster"] = it }
+        val url = mapper.writeValueAsString(payload)
+        return newMovieSearchResponse(title, url, TvType.Live) {
+            this.posterUrl = posterUrl(visuals)
+        }
+    }
+
+    /**
+     * ESPN event tiles are often browse-only cards; their playback action lives on
+     * the entity page. Treat airing event state and sports metadata as event markers
+     * so those tiles are not discarded as navigation.
+     */
+    private fun isEspnEvent(item: JsonNode): Boolean {
+        if (hasPlaybackAction(item)) return true
+        val visuals = item["visuals"] ?: return false
+        val eventState = visuals["badging"]?.get("airingEventState")
+            ?: visuals["airingEventState"]
+        if (eventState != null) return true
+        val metas = visuals["metastringParts"]
+        if (metas != null && metas["sportsLeague"] != null) return true
+        val type = visuals["type"]?.asText()?.lowercase() ?: ""
+        return type.contains("event") || type.contains("sport")
     }
 
     private fun isShelf(container: JsonNode, includeHero: Boolean = false): Boolean {
         val type = container["type"]?.asText()
         if (type == "details" || type == "episodes") return false
         val style = container["style"]?.get("name")?.asText() ?: ""
-        if (style.contains("brand", true) || style.contains("continue_watching", true)) return false
+        if (style.contains("brand", true) ||
+            style.contains("continue_watching", true) ||
+            style.contains("logo_round", true)
+        ) return false
         if (!includeHero && style.contains("hero", true)) return false
         return container["items"] != null
     }
 
-    private fun hasPlaybackAction(item: JsonNode): Boolean =
-        item["actions"]?.any { it["type"]?.asText() == "playback" } == true
+    /** True when the item carries a real playback action, including nested modals. */
+    private fun hasPlaybackAction(item: JsonNode, depth: Int = 0): Boolean {
+        val actions = item["actions"] ?: return false
+        for (action in actions) {
+            val type = action["type"]?.asText()?.lowercase()
+            when {
+                type in setOf("playback", "play", "watch", "tune", "resume") -> return true
+                type == "modal" || type == "upsell" || action["modalType"] != null -> {
+                    if (depth < 3 && hasPlaybackAction(action, depth + 1)) return true
+                }
+                action["resourceId"] != null -> return true
+            }
+        }
+        return false
+    }
 
     private fun isLivePlayable(item: JsonNode): Boolean {
-        val playback = item["actions"]?.firstOrNull { it["type"]?.asText() == "playback" } ?: return false
-        val contentType = playback["contentType"]?.asText()
-        if (contentType == "linear" || contentType == "live") return true
-        return item["visuals"]?.get("badging")?.get("airingEventState") != null
+        val playback = getActions(item)["playback"]
+        val contentType = sequenceOf(
+            playback?.get("contentType")?.asText(),
+            item["contentType"]?.asText(),
+            item["visuals"]?.get("contentType")?.asText(),
+        ).filterNotNull().map { it.lowercase() }.firstOrNull()
+        if (contentType == "live" || contentType == "linear") return true
+
+        val visuals = item["visuals"]
+        val eventState = visuals?.get("badging")?.get("airingEventState")
+            ?: visuals?.get("airingEventState")
+            ?: item["airingEventState"]
+        if (isLiveEventState(eventState)) return true
+        if (visuals?.get("live")?.asBoolean(false) == true) return true
+        return false
     }
 
     override suspend fun search(query: String, page: Int): SearchResponseList? {
@@ -259,11 +842,58 @@ class DisneyPlusProvider(private val api: DisneyApi) : MainAPI() {
 
     override suspend fun load(url: String): LoadResponse? {
         requireLogin()
-        val data = mapper.readTree(url) ?: return null
-        val deeplinkId = data["deeplinkId"].textOrNull() ?: return null
-        val pageId = data["pageId"].textOrNull() ?: pageIdFor(deeplinkId)
-        val pageJson = api.page(pageId, limit = 1, enhancedLimit = 15)
-        return parseDetails(pageJson, url)
+        val trimmed = url.trim()
+        // Accept Disney+ web URLs directly (e.g. a /play/<uuid> live event link).
+        val dataUrl = if (trimmed.startsWith("http")) {
+            val payload = mutableMapOf<String, String>()
+            Regex("/play/([0-9a-fA-F-]{36})").find(trimmed)?.groupValues?.get(1)?.let {
+                payload["deeplinkId"] = it
+                payload["resourceId"] = it
+                payload["contentType"] = "live"
+                payload["title"] = "Disney+"
+            }
+            if (payload.isEmpty()) {
+                Regex("/browse/entity-([0-9a-fA-F-]{36})").find(trimmed)?.groupValues?.get(1)
+                    ?.let {
+                        payload["deeplinkId"] = it
+                        payload["title"] = "Disney+"
+                    }
+            }
+            if (payload.isEmpty()) {
+                Regex("/browse/(page-[0-9a-fA-F-]{36})").find(trimmed)?.groupValues?.get(1)
+                    ?.let {
+                        payload["pageId"] = it
+                        payload["title"] = "Disney+"
+                    }
+            }
+            if (payload.isEmpty()) return null
+            mapper.writeValueAsString(payload)
+        } else {
+            url
+        }
+
+        val data = mapper.readTree(dataUrl) ?: return null
+        val deeplinkId = data["deeplinkId"].textOrNull()
+        val storedPageId = data["pageId"].textOrNull()
+        if (deeplinkId == null && storedPageId == null) {
+            // Live event exposed only as a playback resource (no entity page).
+            data["resourceId"].textOrNull() ?: return null
+            val title = data["title"].textOrNull() ?: return null
+            return newMovieLoadResponse(title, dataUrl, TvType.Live, dataUrl) {
+                this.posterUrl = data["poster"].textOrNull()
+            }
+        }
+        val pageId = storedPageId ?: deeplinkId?.let { pageIdFor(it) } ?: return null
+        val pageJson = runCatching { api.page(pageId, limit = 1, enhancedLimit = 15) }.getOrNull()
+        val parsed = pageJson?.let { runCatching { parseDetails(it, dataUrl) }.getOrNull() }
+        if (parsed != null) return parsed
+
+        // Live guide programs may have no regular entity page. Keep the stored
+        // metadata; loadLinks resolves playback through the deeplink instead.
+        val title = data["title"].textOrNull() ?: "Disney+"
+        return newMovieLoadResponse(title, dataUrl, TvType.Live, dataUrl) {
+            this.posterUrl = data["poster"].textOrNull()
+        }
     }
 
     private suspend fun parseDetails(pageJson: JsonNode, url: String): LoadResponse? {
@@ -331,13 +961,47 @@ class DisneyPlusProvider(private val api: DisneyApi) : MainAPI() {
                 this.plot = plot
             }
         } else {
-            val movieData = withPlaybackInfo(url, getActions(pageJson)["playback"])
-            newMovieLoadResponse(title, url, TvType.Movie, movieData) {
+            val pageAction = getActions(pageJson)["playback"]
+            val contentType = pageAction?.get("contentType")?.asText()?.lowercase()
+            val movieType = if (contentType == "live" || contentType == "linear") {
+                TvType.Live
+            } else {
+                TvType.Movie
+            }
+            val movieData = withPlaybackInfo(url, pageAction)
+            newMovieLoadResponse(title, url, movieType, movieData) {
                 this.posterUrl = poster
                 this.backgroundPosterUrl = background
                 this.plot = plot
             }
         }
+    }
+
+    /**
+     * Linear/live playback resources are base64-encoded JSON with a `channelId`.
+     * The media endpoint expects the playback id resolved from that channel.
+     */
+    private fun channelIdFromResourceId(resourceId: String): String? {
+        val decoded = runCatching {
+            String(Base64.decode(resourceId, Base64.DEFAULT))
+        }.getOrNull() ?: runCatching {
+            String(Base64.decode(resourceId, Base64.URL_SAFE or Base64.NO_WRAP))
+        }.getOrNull() ?: return null
+        return runCatching { mapper.readTree(decoded)["channelId"].textOrNull() }.getOrNull()
+    }
+
+    /**
+     * Linear playback actions expose a base64 resource containing a `channelId`.
+     * The media endpoint needs the playback id resolved from that channel.
+     */
+    private suspend fun resolveLinearPlaybackId(resourceId: String): String {
+        // The stored value can be either a base64 playback resource (with a
+        // channelId inside) or a raw channel id from the guide/direct play URL.
+        val channelId = channelIdFromResourceId(resourceId) ?: resourceId
+        val deeplink = runCatching {
+            api.deeplink(channelId, refType = "channelId", action = "playback")
+        }.getOrNull() ?: return resourceId
+        return deeplink["actions"]?.firstOrNull()?.get("resourceId").textOrNull() ?: resourceId
     }
 
     /** Fallback for data stored without a playback resource: read it from the entity page. */
@@ -363,15 +1027,42 @@ class DisneyPlusProvider(private val api: DisneyApi) : MainAPI() {
         }
         var action: JsonNode? = null
         val storedResourceId = json["resourceId"].textOrNull()
-        val resourceId = storedResourceId ?: run {
+        var resourceId = storedResourceId ?: run {
             action = resolvePlaybackAction(json["deeplinkId"].textOrNull())
             action?.get("resourceId").textOrNull()
         } ?: return false
         val contentType = json["contentType"].textOrNull() ?: action?.get("contentType").textOrNull()
         val isLinear = contentType == "linear" || contentType == "live"
 
-        val playback = api.playback(resourceId)
-        val source = playback["stream"]["sources"]?.firstOrNull() ?: return false
+        // A linear event's stored resource is a base64 JSON with a channelId.
+        // Resolve the real playback id from that channel before asking for media.
+        if (isLinear) resourceId = resolveLinearPlaybackId(resourceId)
+
+        var playback = runCatching { api.playback(resourceId) }.getOrNull()
+        var source = playback?.get("stream")?.get("sources")?.firstOrNull()
+        Log.i(
+            "DisneyLive",
+            "loadLinks contentType=$contentType isLinear=$isLinear " +
+                "streamingType=${playback?.get("stream")?.get("streamingType").textOrNull()} " +
+                "source=${if (source == null) "null" else "ok"}",
+        )
+
+        // Guide/live payloads may store a deeplink id as the resource. If direct
+        // playback fails, resolve the real playback action from the deeplink.
+        if (source == null) {
+            val altDeeplink = json["deeplinkId"].textOrNull()
+            if (altDeeplink != null) {
+                val resolved = resolvePlaybackAction(altDeeplink)
+                    ?.get("resourceId").textOrNull()
+                if (resolved != null && resolved != resourceId) {
+                    resourceId = resolved
+                    if (isLinear) resourceId = resolveLinearPlaybackId(resourceId)
+                    playback = runCatching { api.playback(resourceId) }.getOrNull()
+                    source = playback?.get("stream")?.get("sources")?.firstOrNull()
+                }
+            }
+        }
+        if (source == null) return false
         // Live feeds can report either field; try the expected one first.
         val streamUrl = if (isLinear) {
             source["slide"]?.get("url")?.asText() ?: source["complete"]?.get("url")?.asText()
@@ -380,8 +1071,26 @@ class DisneyPlusProvider(private val api: DisneyApi) : MainAPI() {
         }
         if (streamUrl == null) return false
 
-        val (vodLicense, linearLicense) = api.widevineLicenseEndpoints()
-        val licenseUrl = if (isLinear) linearLicense else vodLicense
+        // Disney's playback payload declares which DRM endpoint the asset type
+        // needs via stream.attributes.security.drmEndpointKey:
+        //   "event"  -> widevineLicense        (/widevine/v1/obtain-license)
+        //   "linear" -> widevineLinearLicense  (/widevine/v1/channel/obtain-license)
+        //   "vod"    -> widevineLicense
+        // Live *events* are "event" content: sending their challenge to the
+        // linear-channel endpoint makes the license server reject it with
+        // "bad-license-request" (400), which ExoPlayer reports as
+        // ERROR_CODE_DRM_LICENSE_ACQUISITION_FAILED.
+        val drmEndpointKey = playback?.get("stream")?.get("attributes")
+            ?.get("security")?.get("drmEndpointKey").textOrNull()
+            ?: when {
+                contentType == "linear" -> "linear"
+                contentType == "live" ||
+                    playback?.get("stream")?.get("streamingType").textOrNull()
+                        ?.equals("LIVE", ignoreCase = true) == true -> "event"
+                else -> "vod"
+            }
+        val licenseUrl = api.widevineLicenseUrl(drmEndpointKey)
+        if (licenseUrl.isNullOrBlank()) return false
 
         // The media CDN rejects any request that carries an `authorization` header
         // (the signed URL is the auth), while the Widevine endpoint requires it.
@@ -389,12 +1098,29 @@ class DisneyPlusProvider(private val api: DisneyApi) : MainAPI() {
         val manifestHeaders = mapOf(
             "User-Agent" to DisneyConstants.userAgent(),
         )
+        // The DRM callback may not go through getVideoInterceptor, so carry the
+        // bearer token on the link as well. The interceptor strips it again for
+        // the media CDN hosts, which reject it.
+        val linkHeaders = manifestHeaders + mapOf(
+            "authorization" to "Bearer ${api.accessToken.orEmpty()}",
+            "Content-Type" to "application/octet-stream",
+        )
 
         // Disney+ is HLS-only, but CloudStream plays DRM exclusively through DASH.
         // Convert the HLS master to a DASH manifest and serve it via the interceptor.
         val preferredAudio = runCatching { api.profileContext().appLanguage }.getOrNull()
-        val dash = runCatching { DisneyDash.buildManifest(streamUrl, preferredAudio) }.getOrNull()
-        if (dash != null) dashManifests[streamUrl] = dash
+        val built = runCatching { DisneyDash.buildManifest(streamUrl, preferredAudio) }.getOrNull()
+        if (built != null) {
+            dashManifests[streamUrl] = DashSource(
+                hlsUrl = streamUrl,
+                preferredAudio = preferredAudio,
+                live = built.live,
+                xml = built.xml,
+                builtAt = System.currentTimeMillis(),
+                availabilityStartTime = built.availabilityStartTime,
+                presentationTimeOffset = built.presentationTimeOffset,
+            )
+        }
 
         // HLS subtitles are WebVTT segments; expose one proxy .vtt URL per language
         // and let the interceptor merge the segments when the user picks one.
@@ -409,11 +1135,11 @@ class DisneyPlusProvider(private val api: DisneyApi) : MainAPI() {
             "Disney+",
             "Disney+",
             streamUrl,
-            if (dash != null) ExtractorLinkType.DASH else ExtractorLinkType.M3U8,
+            if (built != null) ExtractorLinkType.DASH else ExtractorLinkType.M3U8,
             WIDEVINE_UUID,
         ) {
             this.licenseUrl = licenseUrl
-            this.headers = manifestHeaders
+            this.headers = linkHeaders
             this.quality = Qualities.Unknown.value
         }
         callback.invoke(link)
@@ -456,8 +1182,10 @@ class DisneyPlusProvider(private val api: DisneyApi) : MainAPI() {
                 request.url.host == manifestUrl.host &&
                 request.url.encodedPath == manifestUrl.encodedPath
 
-            if (isManifest && manifest != null) {
-                val body = manifest.toResponseBody("application/dash+xml".toMediaType())
+            if (isManifest) {
+                val source = dashManifests[extractorLink.url] ?: manifest
+                val xml = refreshIfLive(extractorLink.url, source)
+                val body = xml.toResponseBody("application/dash+xml".toMediaType())
                 return@Interceptor Response.Builder()
                     .request(request)
                     .protocol(Protocol.HTTP_1_1)
@@ -471,14 +1199,66 @@ class DisneyPlusProvider(private val api: DisneyApi) : MainAPI() {
             }
 
             val builder = request.newBuilder()
-            if (request.url.host == "disney.playback.edge.bamgrid.com") {
+            val isPlaybackHost = request.url.host == "disney.playback.edge.bamgrid.com"
+            if (isPlaybackHost) {
                 api.accessToken?.takeIf { it.isNotBlank() }?.let {
                     builder.header("authorization", "Bearer $it")
                 }
+                builder.header("x-dss-feature-filtering", "true")
             } else {
                 builder.removeHeader("authorization")
+                builder.removeHeader("x-dss-feature-filtering")
+                builder.removeHeader("Content-Type")
             }
-            chain.proceed(builder.build())
+            val isLicense = isPlaybackHost && request.url.encodedPath.contains("obtain-license")
+            if (isLicense) {
+                Log.i(
+                    "DisneyDRM",
+                    "license POST ${request.url} auth=${request.header("authorization") != null} " +
+                        "contentType=${request.header("Content-Type")}",
+                )
+            }
+            val response = chain.proceed(builder.build())
+            if (isLicense) {
+                Log.i("DisneyDRM", "license response code=${response.code} path=${request.url.encodedPath}")
+            }
+            response
         }
+    }
+
+    /**
+     * Rebuilds a live manifest from its HLS playlist when the cached copy is older
+     * than [LIVE_REFRESH_MS]. Rebuilding uses a direct HTTP client so it never
+     * re-enters this interceptor. VOD manifests are returned unchanged.
+     */
+    private fun refreshIfLive(url: String, source: DashSource): String {
+        if (!source.live) return source.xml
+        if (System.currentTimeMillis() - source.builtAt < LIVE_REFRESH_MS) return source.xml
+        val rebuilt = runCatching {
+            runBlocking {
+                DisneyDash.buildManifest(
+                    hlsUrl = source.hlsUrl,
+                    preferredAudio = source.preferredAudio,
+                    direct = true,
+                    anchorStartTime = source.availabilityStartTime,
+                    anchorTimeOffset = source.presentationTimeOffset,
+                )
+            }
+        }.getOrNull()
+        if (rebuilt == null || !rebuilt.live) {
+            Log.w("DisneyLive", "rebuild failed or no longer live; serving cached manifest")
+            return source.xml
+        }
+        dashManifests[url] = source.copy(
+            xml = rebuilt.xml,
+            builtAt = System.currentTimeMillis(),
+        )
+        Log.i(
+            "DisneyLive",
+            "manifest rebuilt: ${rebuilt.xml.length} bytes, " +
+                "availabilityStartTime=${rebuilt.availabilityStartTime}, " +
+                "presentationTimeOffset=${rebuilt.presentationTimeOffset}",
+        )
+        return rebuilt.xml
     }
 }
