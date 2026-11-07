@@ -2,7 +2,10 @@ package com.stormunblessed
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.INFER_TYPE
+import com.lagradost.cloudstream3.utils.getQualityFromName
 import com.lagradost.cloudstream3.utils.loadExtractor
+import com.lagradost.cloudstream3.utils.newExtractorLink
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
@@ -98,11 +101,93 @@ class LACartoonsProvider:MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val res = app.get(data).document
-        res.select(".serie-video-informacion iframe").map {
-            val link = it.attr("src")?.replace("https://short.ink/","https://abysscdn.com/?v=")
-            loadExtractor(fixHostsLinks(link!!), data, subtitleCallback, callback)
+        val iframeSrcs = res.select(".serie-video-informacion iframe")
+            .mapNotNull { it.attr("src") }
+
+        for (src in iframeSrcs) {
+            if (src.contains("ok.ru/") || src.contains("m.ok.ru/")) {
+                // OK.ru embeds: the built-in Odnoklassniki extractor can't parse
+                // the &quot;-encoded JSON in the embed page, so we handle them directly.
+                handleOkRuEmbed(src, callback)
+            } else {
+                // Other hosts: use the standard extractor pipeline.
+                val fixed = fixHostsLinks(src.replace("https://short.ink/", "https://abysscdn.com/?v="))
+                loadExtractor(fixed, data, subtitleCallback, callback)
+            }
         }
+
         return true
+    }
+}
+
+/**
+ * Directly extracts video stream URLs from an OK.ru videoembed page.
+ * This avoids the built-in Odnoklassniki extractor, which fails to parse
+ * the &quot;-encoded JSON in the current OK.ru embed page format.
+ */
+private suspend fun handleOkRuEmbed(
+    embedUrl: String,
+    callback: (ExtractorLink) -> Unit
+) {
+    val headers = mapOf(
+        "Accept" to "*/*",
+        "Connection" to "keep-alive",
+        "Sec-Fetch-Dest" to "empty",
+        "Sec-Fetch-Mode" to "cors",
+        "Sec-Fetch-Site" to "cross-site",
+        "Origin" to "https://ok.ru",
+        "User-Agent" to USER_AGENT,
+    )
+
+    // Ensure we fetch the /videoembed/ metadata page
+    val targetUrl = embedUrl.replace("/video/", "/videoembed/")
+
+    // Fetch embed page and decode HTML entities + JSON escaping
+    val cleaned = app.get(targetUrl, headers = headers).text
+        .replace("&quot;", "\"")
+        .replace("\\&quot;", "\"")
+        .replace("\\\\", "\\")
+        .replace(Regex("\\\\u([0-9A-Fa-f]{4})")) { match ->
+            match.groupValues[1].toInt(16).toChar().toString()
+        }
+
+    // Extract the videos JSON array — safe syntax because content ends with "]"
+    val videosStr = Regex(""""videos":(\[[^]]*])""").find(cleaned)?.groupValues?.get(1) ?: return
+
+    val qualityMap = mapOf(
+        "mobile" to "144p",
+        "lowest" to "240p",
+        "low" to "360p",
+        "sd" to "480p",
+        "hd" to "720p",
+        "full" to "1080p",
+        "quad" to "1440p",
+        "ultra" to "4k",
+    )
+
+    // Match each video entry inside the array
+    val entryRegex = Regex("\"name\":\"([^\"]+)\",\"url\":\"([^\"]+)\"")
+    val matches = entryRegex.findAll(videosStr)
+
+    for (match in matches) {
+        val rawName = match.groupValues[1]
+        var rawUrl = match.groupValues[2]
+        if (rawUrl.startsWith("//")) rawUrl = "https:$rawUrl"
+
+        val qualityStr = qualityMap[rawName.lowercase()] ?: rawName
+
+        callback.invoke(
+            newExtractorLink(
+                source = "OkRuSSL",
+                name = "OkRuSSL",
+                url = rawUrl,
+                type = INFER_TYPE,
+            ) {
+                this.referer = "https://ok.ru/"
+                this.quality = getQualityFromName(qualityStr)
+                this.headers = headers
+            }
+        )
     }
 }
 
