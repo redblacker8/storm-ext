@@ -11,9 +11,6 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 import java.net.URI
 import java.net.URLEncoder
 import java.security.MessageDigest
@@ -406,23 +403,25 @@ suspend fun loadSourceNameExtractor(
     subtitleCallback: (SubtitleFile) -> Unit,
     callback: (ExtractorLink) -> Unit,
 ) {
+    // Collect the links the extractor resolves, then relabel and forward them from
+    // this suspend context. Relabeling here (instead of inside loadExtractor's
+    // non-suspend callback) keeps the recommended `newExtractorLink` API while still
+    // firing the callback before loadLinks() returns — no fire-and-forget coroutine.
+    val resolved = mutableListOf<ExtractorLink>()
     loadExtractor(fixHostsLinks(url), referer, subtitleCallback) { link ->
-        CoroutineScope(Dispatchers.IO).launch {
-            val name = standardSourceName(lang, link.source)
-            callback.invoke(
-                newExtractorLink(
-                    link.source,
-                    name,
-                    link.url,
-                ) {
-                    this.quality = link.quality
-                    this.type = link.type
-                    this.referer = link.referer
-                    this.headers = link.headers
-                    this.extractorData = link.extractorData
-                }
-            )
-        }
+        resolved.add(link)
+    }
+    resolved.forEach { link ->
+        val name = standardSourceName(lang, link.source)
+        callback.invoke(
+            newExtractorLink(link.source, name, link.url) {
+                this.quality = link.quality
+                this.type = link.type
+                this.referer = link.referer
+                this.headers = link.headers
+                this.extractorData = link.extractorData
+            }
+        )
     }
 }
 

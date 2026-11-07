@@ -1,12 +1,14 @@
 package com.lagradost.cloudstream3.movieproviders
 
 import android.util.Log
+import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.network.CloudflareKiller
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.nicehttp.NiceResponse
 import com.stormunblessed.Embed69Extractor
 import com.stormunblessed.loadSourceNameExtractor
+import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 
 class EntrepeliculasyseriesProvider : MainAPI() {
@@ -78,20 +80,15 @@ class EntrepeliculasyseriesProvider : MainAPI() {
         val poster = doc.selectFirst(".movie-poster img")?.attr("src")
         val tags = doc.select(".movie-genres a").map { it.text() }
         val recommendations = doc.select(".post-lst li").mapNotNull { it.toSearchResult() }
-        val episodeRegex = """/temporada/(\d+)/capitulo/(\d+)""".toRegex()
         val episodes = doc.select("div.episodes-grid").flatMap { grid ->
             grid.select(".episode-card a").mapNotNull { link ->
-                val href = link.attr("href")
-                val url = href.replaceFirst("^/".toRegex(), "$mainUrl/")
-                val match = episodeRegex.find(href)
-                if (match != null) {
-                    val season = match.groupValues[1].toIntOrNull()
-                    val episode = match.groupValues[2].toIntOrNull()
-                    newEpisode(url) {
-                        this.season = season
-                        this.episode = episode
-                    }
-                } else null
+                val season = link.attr("data-season").toIntOrNull()
+                val episode = link.attr("data-episode").toIntOrNull()
+                val epUrl = url.trimEnd('/') + "#s${season}-e$episode"
+                newEpisode(epUrl) {
+                    this.season = season
+                    this.episode = episode
+                }
             }
         }
         return when (tvType) {
@@ -124,6 +121,45 @@ class EntrepeliculasyseriesProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
+        // Series/anime episodes use hash URLs: {mainUrl}/{type}/{slug}#s{season}-e{episode}
+        val hashMatch = Regex("""#s(\d+)-e(\d+)""").find(data)
+        if (hashMatch != null) {
+            val season = hashMatch.groupValues[1]
+            val episode = hashMatch.groupValues[2]
+            val base = data.substringBefore("#")
+            val typeSlug = Regex("""$mainUrl/(serie|anime|pelicula)/([^/]+)""").find(base)
+            if (typeSlug != null) {
+                val type = typeSlug.groupValues[1]
+                val slug = typeSlug.groupValues[2]
+                val resp = appGetCf("$mainUrl/api/episodio/$type/$slug/$season/$episode")
+                    .parsedSafe<EpisodeApiResponse>()
+                val html = resp?.html
+                if (!html.isNullOrBlank()) {
+                    val doc = Jsoup.parse(html)
+                    // Each server is a player-tab button whose data-url points to a /vidurl/ page
+                    val tabs = doc.select("button.player-tab[data-url]")
+                    if (tabs.isNotEmpty()) {
+                        tabs.amap { btn ->
+                            val vidUrl = btn.attr("data-url")
+                            val fullUrl = if (vidUrl.startsWith("/")) "$mainUrl$vidUrl" else vidUrl
+                            val vidDoc = appGetCf(fullUrl).document
+                            Embed69Extractor.loadFromDocument(vidDoc, fullUrl, subtitleCallback, callback)
+                        }
+                    } else {
+                        // Fallback: single iframe in the returned HTML
+                        doc.select("iframe#player-iframe").amap { iframe ->
+                            val vidUrl = iframe.attr("src")
+                            val fullUrl = if (vidUrl.startsWith("/")) "$mainUrl$vidUrl" else vidUrl
+                            val vidDoc = appGetCf(fullUrl).document
+                            Embed69Extractor.loadFromDocument(vidDoc, fullUrl, subtitleCallback, callback)
+                        }
+                    }
+                    return true
+                }
+            }
+        }
+
+        // Movies (direct URL) — keep existing player-frame extraction
         appGetCf(data).document.select("div.player-frame").amap {
             it.selectFirst("iframe")?.attr("src")?.let { src ->
                 val embedUrl = if (src.startsWith("/")) "$mainUrl$src" else src
@@ -152,4 +188,8 @@ class EntrepeliculasyseriesProvider : MainAPI() {
         }
         return true
     }
+
+    data class EpisodeApiResponse(
+        @JsonProperty("html") val html: String? = null,
+    )
 }

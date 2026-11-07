@@ -9,9 +9,6 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 
@@ -21,7 +18,7 @@ class PeliculasFlixProvider:MainAPI() {
         private val mediaType = "application/json; charset=utf-8".toMediaType()
     }
 
-    override var mainUrl = "https://pelisflixhd.blog"
+    override var mainUrl = "https://pelisflixhd.love"
     override var name = "PeliculasFlix"
     override var lang = "es"
     override val hasMainPage = true
@@ -107,85 +104,46 @@ class PeliculasFlixProvider:MainAPI() {
         @JsonProperty("link"       ) var link      : String? = null,
         @JsonProperty("__typename" ) var _typename : String? = null
     )
-    private val sections = listOf(
-        Triple("CREATEDAT_DESC",  null,     "Últimas Películas"),
-        Triple("CREATEDAT_DESC",  "accion", "Acción"),
-        Triple("POPULARITY_DESC", null,     "Más Populares"),
-    )
-
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
-        val items = ArrayList<HomePageList>()
-        val perPage = 30
-        var hasNext = false
-
-        if (page <= 1) {
-            for ((sort, genreSlug, name) in sections) {
-                try {
-                    val body = buildListQuery(perPage, sort, genreSlug, 1)
-                    val res = app.post(peliflixapi, requestBody = body.toRequestBody(mediaType)).parsed<PeliMain>()
-                    val data = res.data?.paginationFilm
-                    val movies = data?.items?.map { tasa(it) }
-                    if (!movies.isNullOrEmpty()) {
-                        items.add(HomePageList(name, movies))
-                    }
-                    if (data?.pageInfo?.hasNextPage == true) hasNext = true
-                } catch (_: Exception) {}
-            }
-        } else {
-            try {
-                val body = buildListQuery(perPage, "CREATEDAT_DESC", null, page)
-                val res = app.post(peliflixapi, requestBody = body.toRequestBody(mediaType)).parsed<PeliMain>()
-                val data = res.data?.paginationFilm
-                val movies = data?.items?.map { tasa(it) }
-                if (!movies.isNullOrEmpty()) {
-                    items.add(HomePageList("Últimas Películas", movies))
+        // The GraphQL API is frozen (last data from 2023) and its links are dead, so we scrape the
+        // live HTML site instead. It exposes the current catalog with working Voe embed links.
+        val doc = app.get("$mainUrl/").document
+        val lists = doc.select("section dl").mapNotNull { dl ->
+            val sectionTitle = dl.selectFirst("dt.section-title")?.text()?.trim() ?: return@mapNotNull null
+            val movies = dl.select("div.movie-item").mapNotNull { item ->
+                val a = item.selectFirst("a") ?: return@mapNotNull null
+                val href = a.attr("href")
+                if (!href.contains("/pelicula/")) return@mapNotNull null
+                val title = item.selectFirst(".item-detail p")?.text()?.trim() ?: return@mapNotNull null
+                val img = item.selectFirst("img.poster")?.attr("src")?.let { src ->
+                    if (src.startsWith("//")) "https:$src" else src
                 }
-                if (data?.pageInfo?.hasNextPage == true) hasNext = true
-            } catch (_: Exception) {}
+                newMovieSearchResponse(title, fixUrl(href), TvType.Movie) {
+                    this.posterUrl = img
+                }
+            }
+            if (movies.isEmpty()) null else HomePageList(sectionTitle, movies)
         }
-
-        if (items.isEmpty()) throw ErrorLoadingException()
-        return newHomePageResponse(items, hasNext)
+        if (lists.isEmpty()) throw ErrorLoadingException()
+        return newHomePageResponse(lists, false)
     }
 
-    private fun buildListQuery(perPage: Int, sort: String, genreSlug: String?, page: Int): String {
-        val filter = if (genreSlug != null) {
-            ",\"filter\":{\"isPublish\":true,\"genres\":{\"slug\":\"$genreSlug\"}}"
-        } else {
-            ",\"filter\":{\"isPublish\":true}"
-        }
-        return "{\"operationName\":\"listMovies\",\"variables\":{\"perPage\":$perPage,\"sort\":\"$sort\"$filter,\"page\":$page},\"query\":\"query listMovies(\$page: Int, \$perPage: Int, \$sort: SortFindManyFilmInput, \$filter: FilterFindManyFilmInput) {\\n  paginationFilm(page: \$page, perPage: \$perPage, sort: \$sort, filter: \$filter) {\\n    items {\\n      _id\\n      title\\n      name\\n      poster_path\\n      slug\\n      name_es\\n      __typename\\n    }\\n    pageInfo {\\n      currentPage\\n      hasNextPage\\n      __typename\\n    }\\n    __typename\\n  }\\n}\\n\"}"
-    }
-
-    private fun tasa(
-        info: PeliItems
-    ): SearchResponse {
-        val title = info.name ?: ""
-        val slug = info.slug
-        val poster = info.posterPath
-        val realposter = getImageUrl(poster)
-        val id = info.Id
-        val typename = info._typename
-        val data = "{\"id\":\"$id\",\"slug\":\"$slug\",\"type\":\"$typename\"}"
-        return newMovieSearchResponse(title, data, TvType.Movie) {
-            this.posterUrl = realposter
-        }
-    }
     override suspend fun search(query: String): List<SearchResponse>? {
+        // Scrape the live site search - the GraphQL "searchFilm" only knows the stale 2023 catalog.
         val searchUrl = "$mainUrl/busqueda/${query.replace(" ", "%20")}"
         val doc = app.get(searchUrl).document
         return doc.select("div.movie-item").mapNotNull { item ->
             val a = item.selectFirst("a") ?: return@mapNotNull null
             val href = a.attr("href")
             if (!href.contains("/pelicula/")) return@mapNotNull null
-            val title = item.selectFirst(".item-detail p")?.text() ?: return@mapNotNull null
+            val title = item.selectFirst(".item-detail p")?.text()?.trim() ?: return@mapNotNull null
             val img = item.selectFirst("img")?.attr("src")?.let { src ->
                 if (src.startsWith("//")) "https:$src" else src
             }
             newMovieSearchResponse(title, fixUrl(href), TvType.Movie) {
                 this.posterUrl = img
             }
-        }
+        }.ifEmpty { null }
     }
 
     data class PelisInfo (
@@ -197,7 +155,7 @@ class PeliculasFlixProvider:MainAPI() {
         if (url.contains("/pelicula/")) {
             val doc = app.get(url).document
             val title = doc.selectFirst("h1.title span[itemprop=name]")?.text()
-                ?.removePrefix("Ver Película ")?.trim() ?: ""
+                ?.trim()?.removePrefix("Ver Película ")?.trim() ?: ""
             val poster = doc.selectFirst("img[alt*=poster]")?.attr("src")?.let { src ->
                 if (src.startsWith("//")) "https:$src" else src
             }
@@ -237,7 +195,7 @@ class PeliculasFlixProvider:MainAPI() {
         val bodyJson = "{\"operationName\":\"detailFilm\",\"variables\":{\"slug\":\"$sluginfo\"},\"query\":\"query detailFilm(\$slug: String!) {\\n  detailFilm(filter: {slug: \$slug}) {\\n    name\\n    title\\n    name_es\\n    overview\\n    languages\\n    popularity\\n  poster\\n poster_path\\n  backdrop\\n backdrop_path\\n  genres {\\n      name\\n      slug\\n      __typename\\n    }\\n    labels {\\n      name\\n      slug\\n      __typename\\n    }\\n     backdrop\\n    links_online {\\n      _id\\n      server\\n      lang\\n      link\\n      __typename\\n    }\\n    __typename\\n  }\\n}\\n\"}"
         val res = app.post(peliflixapi, requestBody = bodyJson.toRequestBody(mediaType)).parsed<PeliMain>()
         val meta = res.data?.detailFilm
-        val title = meta?.title
+        val title = meta?.name ?: meta?.title ?: ""
         val plot = meta?.overview
         val posterinfo = meta?.posterPath ?: meta?.poster ?: ""
         val backposterinfo = meta?.backdropPath ?: meta?.backdrop ?: ""
@@ -247,7 +205,7 @@ class PeliculasFlixProvider:MainAPI() {
         val tags1 = meta?.genres?.map { tags.add(it.name!!) }
         val tags2 = meta?.labels?.map { tags.add(it.name!!) }
         val movieData = meta?.linksOnline?.toJson() ?: ""
-        return newMovieLoadResponse(title!!, "{\"id\":\"$id\",\"slug\":\"$sluginfo\",\"type\":\"$typename\"}", TvType.Movie, movieData){
+        return newMovieLoadResponse(title, "{\"id\":\"$id\",\"slug\":\"$sluginfo\",\"type\":\"$typename\"}", TvType.Movie, movieData){
             this.posterUrl = poster
             this.plot = plot
             this.backgroundPosterUrl = backposter
@@ -290,33 +248,28 @@ class PeliculasFlixProvider:MainAPI() {
                         }
                     )
                 }
-            } else if (link.contains("nupload.top")) {
-                val uploadDoc = app.get(link).document
-                val iframeSrc = uploadDoc.selectFirst("iframe")?.attr("src")?.let { src ->
-                    if (src.startsWith("//")) "https:$src" else src
-                }
-                if (iframeSrc != null) {
-                    loadExtractor(iframeSrc, mainUrl, subtitleCallback) { extracted ->
-                        CoroutineScope(Dispatchers.IO).launch {
-                            callback.invoke(newExtractorLink(extracted.source, "$lang - ${extracted.name}", extracted.url) {
-                                this.quality = extracted.quality
-                                this.type = extracted.type
-                                this.referer = extracted.referer
-                                this.headers = extracted.headers
-                            })
-                        }
-                    }
-                }
             } else {
-                loadExtractor(link, mainUrl, subtitleCallback) { extracted ->
-                    CoroutineScope(Dispatchers.IO).launch {
-                        callback.invoke(newExtractorLink(extracted.source, "$lang - ${extracted.name}", extracted.url) {
-                            this.quality = extracted.quality
-                            this.type = extracted.type
-                            this.referer = extracted.referer
-                            this.headers = extracted.headers
-                        })
+                val collected = ArrayList<ExtractorLink>()
+                val target = if (link.contains("nupload.")) {
+                    val uploadDoc = app.get(link).document
+                    uploadDoc.selectFirst("iframe")?.attr("src")?.let { src ->
+                        if (src.startsWith("//")) "https:$src" else src
                     }
+                } else {
+                    link
+                }
+                if (target != null) {
+                    loadExtractor(target, mainUrl, subtitleCallback) { extracted ->
+                        collected.add(extracted)
+                    }
+                }
+                collected.forEach { extracted ->
+                    callback.invoke(newExtractorLink(extracted.source, "$lang - ${extracted.name}", extracted.url) {
+                        this.quality = extracted.quality
+                        this.type = extracted.type
+                        this.referer = extracted.referer
+                        this.headers = extracted.headers
+                    })
                 }
             }
         }

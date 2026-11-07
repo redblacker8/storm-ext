@@ -5,6 +5,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import org.jsoup.nodes.Element
 import org.jsoup.select.Elements
+import java.net.URLDecoder
 
 
 class SoloLatinoProvider : MainAPI() {
@@ -44,9 +45,13 @@ class SoloLatinoProvider : MainAPI() {
         )
     }
 
+    /** Clean whitespace and malformed characters from href attributes the site emits. */
+    private fun String?.cleanHref(): String? =
+        this?.trim()?.replace(" ", "%20")
+
     private fun Element.toSearchResult(): SearchResponse {
         val title = this.selectFirst("div.card__info p.card__title")?.text() ?: "xd"
-        val link = this.selectFirst("a")?.attr("href") ?: "xd"
+        val link = this.selectFirst("a")?.attr("href")?.cleanHref() ?: "xd"
         val img = this.selectFirst("a div.card__poster-wrap img.card__poster")?.attr("src")
         val type = if (link.contains("/pelicula/")) TvType.Movie else TvType.TvSeries
         return newMovieSearchResponse(title, link, type) {
@@ -84,7 +89,7 @@ class SoloLatinoProvider : MainAPI() {
         val episodes = doc.select("div[data-season-panel]").flatMap {
             val season = it.attr("data-season-panel").toIntOrNull()
             it.select("a.ep-item").mapIndexed { idx, it ->
-                val url = it.attr("href")
+                val url = it.attr("href").cleanHref()
                 val title = it.selectFirst("p.text-sm.font-semibold.text-white.leading-tight")?.text()
                 val img = it.selectFirst("img.ep-thumb")?.attr("src")
                 newEpisode(url){
@@ -134,11 +139,24 @@ class SoloLatinoProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val doc = app.get(data).document
-        val csrf = doc.selectFirst("meta[name=csrf-token]")?.attr("content") ?: ""
+
+        // Laravel Sanctum CSRF: establish a session and grab the XSRF-TOKEN cookie.
+        // The API rejects X-CSRF-TOKEN from the meta tag ("CSRF token mismatch") and
+        // requires the Origin header plus the URL-decoded cookie as X-XSRF-TOKEN.
+        val csrfCookies = app.get("$mainUrl/sanctum/csrf-cookie").cookies
+        val xsrfToken = csrfCookies["XSRF-TOKEN"]?.let { raw ->
+            try {
+                URLDecoder.decode(raw, "UTF-8")
+            } catch (e: Exception) {
+                raw
+            }
+        } ?: ""
+
         val headers = mapOf(
             "Content-Type" to "application/json",
-            "X-CSRF-TOKEN" to csrf,
             "Accept" to "application/json",
+            "X-XSRF-TOKEN" to xsrfToken,
+            "Origin" to mainUrl,
         )
         // Language groups ("mx" -> Latino) each hold their own server buttons
         val langGroups: List<Pair<String, Elements>> = doc.select("div[data-lang-group]")
@@ -157,10 +175,16 @@ class SoloLatinoProvider : MainAPI() {
                     val response = app.post(
                         "$mainUrl/api/player-url",
                         headers = headers,
-                        data = mapOf("t" to token)
+                        cookies = csrfCookies,
+                        json = mapOf("t" to token)
                     ).parsedSafe<PlayerResponse>()
                     response?.let { resolved ->
-                        val url = resolved.url
+                        val url = when {
+                            resolved.url.startsWith("//") -> "https:${resolved.url}"
+                            resolved.url.startsWith("/") -> "$mainUrl${resolved.url}"
+                            resolved.url.startsWith("http") -> resolved.url
+                            else -> return@amap
+                        }
                         when {
                             resolved.type == "mp4" -> callback.invoke(
                                 newExtractorLink(
@@ -171,6 +195,9 @@ class SoloLatinoProvider : MainAPI() {
                             )
                             url.startsWith("https://embed69.org/") -> {
                                 Embed69Extractor.load(url, data, subtitleCallback, callback)
+                            }
+                            url.startsWith("https://player.pelisserieshoy.com/") -> {
+                                PelisserieshoyExtractor.load(url, subtitleCallback, callback)
                             }
                             url.startsWith("https://xupalace.org/video") -> {
                                 val regex = """(go_to_player|go_to_playerVast)\('(.*?)'""".toRegex()
