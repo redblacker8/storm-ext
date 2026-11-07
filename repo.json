@@ -1,0 +1,9 @@
+{
+  "name": "Storm-ext Fork by renlord48",
+  "description": "A Storm-ext fork with the renlord48 changes (JKAnime episode order fix).",
+  "iconUrl": "https://raw.githubusercontent.com/renlord48/storm-ext/master/assets/repoIcon.jpg",
+  "manifestVersion": 1,
+  "pluginLists": [
+    "https://raw.githubusercontent.com/renlord48/storm-ext/builds/plugins.json"
+  ]
+}
