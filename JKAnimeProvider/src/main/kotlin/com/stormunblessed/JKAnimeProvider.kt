@@ -214,15 +214,17 @@ class JKAnimeProvider : MainAPI() {
                 val ep = newEpisode(link){
                     this.posterUrl = image
                 }
+
                 episodes.add(ep)
             }
             if(json?.nextPageurl.isNullOrEmpty())
                 finished = true
         }while (finished == false)
+        val sortedEpisodes = episodes.sortedBy { it.data.substringAfterLast("/").toIntOrNull() ?: 0 }
 
         return newAnimeLoadResponse(title!!, url, getType(type!!)) {
             posterUrl = poster
-            addEpisodes(DubStatus.Subbed, episodes)
+            addEpisodes(DubStatus.Subbed, sortedEpisodes)
             showStatus = status
             plot = description
             tags = genres
