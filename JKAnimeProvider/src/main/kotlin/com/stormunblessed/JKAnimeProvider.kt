@@ -213,16 +213,19 @@ class JKAnimeProvider : MainAPI() {
                 val link = "${url.removeSuffix("/")}/${info.number}"
                 val ep = newEpisode(link){
                     this.posterUrl = image
+                    this.episode = info.number?.toIntOrNull()
                 }
+
                 episodes.add(ep)
             }
             if(json?.nextPageurl.isNullOrEmpty())
                 finished = true
         }while (finished == false)
+        val sortedEpisodes = episodes.sortedBy { it.episode }
 
         return newAnimeLoadResponse(title!!, url, getType(type!!)) {
             posterUrl = poster
-            addEpisodes(DubStatus.Subbed, episodes)
+            addEpisodes(DubStatus.Subbed, sortedEpisodes)
             showStatus = status
             plot = description
             tags = genres
