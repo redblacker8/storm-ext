@@ -28,11 +28,12 @@ class MonoschinosProvider : MainAPI() {
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         if (request.data == "") {
             val doc = app.get(mainUrl, timeout = 120).document
-            val latest = doc.select("ul.row.row-cols-xl-4 li.col article").map { article ->
-                val title = article.selectFirst("h2")?.text() ?: ""
-                val href = fixUrl(article.selectFirst("a")?.attr("href") ?: "")
-                val poster = article.selectFirst("img")?.attr("data-src") ?: ""
-                val ep = article.selectFirst("span.episode")?.text()?.toIntOrNull()
+            val latest = doc.select("main section:first-child div.grid > article").map { article ->
+                val title = article.selectFirst("h3.card-title")?.text() ?: ""
+                val href = fixUrl(article.selectFirst("a.card-wrap")?.attr("href") ?: "")
+                val poster = article.selectFirst("img")?.attr("data-src")
+                    ?: article.selectFirst("img")?.attr("src") ?: ""
+                val ep = article.selectFirst("div.absolute:contains(EP)")?.text()?.replace("EP ", "")?.toIntOrNull()
                 newAnimeSearchResponse(title, href, TvType.Anime) {
                     this.posterUrl = fixUrlNull(poster)
                     addDubStatus(DubStatus.Subbed, ep)
@@ -45,8 +46,8 @@ class MonoschinosProvider : MainAPI() {
         }
         val url = if (page <= 1) "$mainUrl/animes" else "$mainUrl/animes?p=$page"
         val doc = app.get(url, timeout = 120).document
-        val home = doc.select("ul.row li.col a").mapNotNull { it.toSearchResult() }
-        val hasNext = doc.selectFirst("a.page-link[rel=next]") != null
+        val home = doc.select("main div.grid a.card-wrap").mapNotNull { it.toSearchResult() }
+        val hasNext = doc.selectFirst("a[rel=next]") != null
         return newHomePageResponse(
             list = HomePageList(request.name, home, isHorizontalImages = false),
             hasNext = hasNext
@@ -56,7 +57,8 @@ class MonoschinosProvider : MainAPI() {
     private fun Element.toSearchResult(): SearchResponse? {
         val title = this.selectFirst("h3")?.text() ?: return null
         val href = this.attr("href")
-        val poster = this.selectFirst("img")?.attr("data-src") ?: ""
+        val poster = this.selectFirst("img")?.attr("data-src")
+            ?: this.selectFirst("img")?.attr("src") ?: ""
         return newAnimeSearchResponse(title, href, TvType.Anime) {
             this.posterUrl = fixUrlNull(poster)
         }
@@ -64,7 +66,7 @@ class MonoschinosProvider : MainAPI() {
 
     override suspend fun search(query: String): List<SearchResponse> {
         val doc = app.get("$mainUrl/buscar?q=$query", timeout = 120).document
-        return doc.select("ul.row li.col a").mapNotNull { it.toSearchResult() }
+        return doc.select("main div.grid a.card-wrap").mapNotNull { it.toSearchResult() }
     }
 
     data class CapList(
@@ -80,19 +82,18 @@ class MonoschinosProvider : MainAPI() {
         val doc = resp.document
         val cookies = resp.cookies
 
-        val title = doc.selectFirst("h1.fs-2")?.text() ?: return null
+        val title = doc.selectFirst("h1")?.text() ?: return null
         val poster = doc.selectFirst("meta[property=og:image]")?.attr("content")
-        val backimage = doc.selectFirst("img[style*='blur']")?.attr("data-src")
-        val plot = doc.selectFirst("#profile-tab-pane p")?.text() ?: doc.selectFirst("meta[property=og:description]")?.attr("content")
+        val plot = doc.selectFirst("meta[property=og:description]")?.attr("content")
 
-        val typeText = doc.select("div.col-12.col-md-3 dl dd").firstOrNull()?.text() ?: ""
+        val typeText = doc.selectFirst("dt:contains(Tipo) + dd")?.text() ?: ""
         val tvType = when {
             typeText.contains("Pelicula") -> TvType.AnimeMovie
             typeText.contains("OVA") || typeText.contains("Especial") -> TvType.OVA
             else -> TvType.Anime
         }
 
-        val tags = doc.select("a[href^='/genero/'] span.badge").map { it.text() }
+        val tags = doc.select("a[href^='/genero/']").map { it.text() }
 
         val status = when {
             doc.text().contains("Estreno") -> ShowStatus.Ongoing
@@ -122,7 +123,6 @@ class MonoschinosProvider : MainAPI() {
 
         return newAnimeLoadResponse(title, url, tvType) {
             this.posterUrl = poster
-            this.backgroundPosterUrl = backimage ?: poster
             this.plot = plot
             this.tags = tags
             this.showStatus = status
