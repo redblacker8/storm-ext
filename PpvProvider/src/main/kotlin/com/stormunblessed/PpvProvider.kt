@@ -4,7 +4,8 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.AppUtils
 import com.lagradost.cloudstream3.utils.AppUtils.toJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.M3u8Helper
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import com.lagradost.cloudstream3.utils.newExtractorLink
 
 class PpvProvider : MainAPI() {
     override var mainUrl = "https://ppv.st"
@@ -197,6 +198,13 @@ class PpvProvider : MainAPI() {
         }
     }
 
+    /**
+     * Emits the resolved master playlist directly. It cannot go through M3u8Helper: the stream
+     * hosts answer 403 unless the request carries a Referer from the player page, while
+     * M3u8Helper fetches the playlist without one (its `referer` argument only decorates the
+     * links it returns) and therefore comes back empty. The player fetches the master itself
+     * with the Referer attached here and expands its variants.
+     */
     private suspend fun generateLinks(
         server: String?,
         lang: String?,
@@ -204,11 +212,15 @@ class PpvProvider : MainAPI() {
         referer: String,
         callback: (ExtractorLink) -> Unit
     ) {
-        M3u8Helper.generateM3u8(
-            normalizeSourceServer(server),
-            m3u8,
-            referer,
-            name = standardSourceName(lang, server)
-        ).forEach(callback)
+        callback(
+            newExtractorLink(
+                normalizeSourceServer(server),
+                standardSourceName(lang, server),
+                m3u8,
+                type = ExtractorLinkType.M3U8
+            ) {
+                this.referer = referer
+            }
+        )
     }
 }
