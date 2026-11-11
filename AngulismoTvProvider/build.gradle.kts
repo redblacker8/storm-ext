@@ -1,11 +1,11 @@
 // use an integer for version numbers
-version = 3
+version = 1
 
 cloudstream {
-    language = "en"
+    language = "mx"
     // All of these properties are optional, you can safely remove them
 
-    description = "Multilang live sports"
+    description = "Agenda deportiva y canales en vivo desde AngulismoTV."
     authors = listOf("redblacker8")
 
     /**
@@ -20,5 +20,5 @@ cloudstream {
         "Live",
     )
 
-    iconUrl = "https://sportsbite.org/og-image.png"
+    iconUrl = "https://angulismotv.pages.dev/assets/logo.png"
 }

@@ -79,3 +79,26 @@ data class EventImage(
     val leagueLogo: String? = null,
 )
 
+// strmfree.pk GET /streams -> { streams: { <categoria>: [ ... ] } }
+data class SfStreamsResponse(
+    val streams: Map<String, List<SfStream>>? = null
+)
+
+data class SfStream(
+    val name: String? = null,
+    val stream_key: String? = null,
+    val category: String? = null,
+)
+
+// strmfree.pk GET /api/v1/sources/<key> -> { sources: [ { quality, url, broadcast } ] }
+data class SfSourcesResponse(
+    val sources: List<SfSource>? = null
+)
+
+data class SfSource(
+    val quality: String? = null,
+    val url: String? = null,
+    val broadcast: String? = null,
+)
+
+

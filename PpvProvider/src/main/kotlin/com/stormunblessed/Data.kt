@@ -46,7 +46,7 @@ data class PpvSubstream(
 
 /**
  * Compact snapshot of a catalog row embedded as the `dataUrl`, so load()/loadLinks() never have
- * to re-query the catalog. Same trick as StreamedProvider's APIMatch json.
+ * to re-query the catalog. Same trick as SportsBiteProvider's APIMatch json.
  */
 data class PpvItem(
     val name: String? = null,

@@ -1,12 +1,11 @@
 // use an integer for version numbers
-version = 34
-
+version = 1
 
 cloudstream {
-    language = "mx"
+    language = "en"
     // All of these properties are optional, you can safely remove them
 
-    description = "Deportes eventos en vivo. Sports live events. Futbol. Soccer."
+    description = "Live sports from SportsBite"
     authors = listOf("redblacker8")
 
     /**
@@ -21,5 +20,5 @@ cloudstream {
         "Live",
     )
 
-    iconUrl = "https://yt3.googleusercontent.com/T_d2j2xZMjAxPCehiFR6hAv7jE3swcUzfgV8wCXzv1IL7rCEDv3cgQtIxjdmLVyP6ZrSgIu0nw=s900-c-k-c0x00ffffff-no-rj"
+    iconUrl = "https://sportsbite.org/og-image.png"
 }
