@@ -20,7 +20,7 @@ class PpvProvider : MainAPI() {
     )
 
     override val mainPage = mainPageOf(
-        "live" to "Live",
+        "live" to "Live now",
         "popular" to "Popular",
         "24-7" to "24/7 Channels",
         "American Football" to "Am. Football",
@@ -95,7 +95,10 @@ class PpvProvider : MainAPI() {
         val all = fetchCatalog()
         val events = when (request.data) {
             "all" -> all.sortedBy { it.starts_at ?: Long.MAX_VALUE }
-            "live" -> all.filter { it.isLiveAt(now) }.sortedBy { it.starts_at ?: Long.MAX_VALUE }
+            // Like the site's first home row: only events inside their kickoff window (24/7
+            // channels have their own row), most watched first.
+            "live" -> all.filter { it.always_live != 1 && it.isLiveAt(now) }
+                .sortedByDescending { it.viewers ?: 0 }
             "popular" -> all.sortedByDescending { it.viewers ?: 0 }
             "24-7" -> all.filter { it.always_live == 1 }
             else -> all.filter { it.category_name == request.data }
