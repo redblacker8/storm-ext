@@ -5,6 +5,7 @@ import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.amap
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import java.net.URLEncoder
 
@@ -18,6 +19,10 @@ import java.net.URLEncoder
  *  4. POST /s.php a=1  -> server list (grouped by language in langs_s).
  *  5. POST /s.php a=click -> unlock (avoids the "no_click" rejection).
  *  6. POST /s.php a=2 (per server, with tk = FNV-1a(rt+"|clk|"+qc)) -> {type,u|url}.
+ *
+ * The /s.php endpoints answer 403 to any Referer that is not the player page itself
+ * (the site only issues same-origin fetches), and the CDN refuses direct playback,
+ * so HLS urls are handed to the player through the site's signed /p.php proxy.
  */
 object PelisserieshoyExtractor {
     private const val MAIN_URL = "https://player.pelisserieshoy.com"
@@ -32,6 +37,19 @@ object PelisserieshoyExtractor {
             h = h * 16777619u
         }
         return h.toString(16)
+    }
+
+    private fun String.absolute(): String = when {
+        startsWith("//") -> "https:$this"
+        startsWith("/") -> "$MAIN_URL$this"
+        else -> this
+    }
+
+    /** Wraps a stream url in /p.php?url=..&sig=.. — the CDN only serves the proxied playlist. */
+    private fun proxyUrl(stream: String, sig: String?): String {
+        if (sig.isNullOrBlank() || stream.contains("/p.php")) return stream
+        return "$MAIN_URL/p.php?url=${URLEncoder.encode(stream, "UTF-8")}" +
+                "&sig=${URLEncoder.encode(sig, "UTF-8")}"
     }
 
     suspend fun load(
@@ -55,7 +73,12 @@ object PelisserieshoyExtractor {
         if (qk.size < 4) return
         val rt = qk[1] + qk[3] + qk[0] + qk[2]
 
-        val postHeaders = pageHeaders + ("Content-Type" to "application/x-www-form-urlencoded;charset=UTF-8")
+        // /s.php is a same-origin endpoint: the Referer has to be the player page itself.
+        val postHeaders = mapOf(
+            "Referer" to url,
+            "Origin" to MAIN_URL,
+            "Content-Type" to "application/x-www-form-urlencoded;charset=UTF-8",
+        )
 
         fun enc(v: String) = URLEncoder.encode(v, "UTF-8")
 
@@ -112,18 +135,25 @@ object PelisserieshoyExtractor {
                     )
                 ).parsedSafe<PlayerResolveResponse>() ?: return@amap
 
+                val source = normalizeSourceServer(serverName)
+                val name = standardSourceName(lang, serverName)
                 when {
                     resolve.type == "iframe" && !resolve.url.isNullOrBlank() -> {
                         loadSourceNameExtractor(lang, resolve.url, url, subtitleCallback, callback)
                     }
-                    !resolve.u.isNullOrBlank() -> {
-                        val stream = resolve.u.let { if (it.startsWith("/")) "$MAIN_URL$it" else it }
+                    resolve.type == "mp4" && !resolve.u.isNullOrBlank() -> {
+                        // /p.php?v=..&ps=.. answers 302 to the file host.
                         callback.invoke(
-                            newExtractorLink(
-                                normalizeSourceServer(serverName),
-                                standardSourceName(lang, serverName),
-                                stream
-                            ) {
+                            newExtractorLink(source, name, resolve.u.absolute()) {
+                                this.type = ExtractorLinkType.VIDEO
+                                this.referer = url
+                            }
+                        )
+                    }
+                    !resolve.u.isNullOrBlank() -> {
+                        callback.invoke(
+                            newExtractorLink(source, name, proxyUrl(resolve.u.absolute(), resolve.sig)) {
+                                this.type = ExtractorLinkType.M3U8
                                 this.referer = url
                             }
                         )
@@ -143,4 +173,5 @@ data class PlayerResolveResponse(
     val type: String? = null,
     val u: String? = null,
     val url: String? = null,
+    val sig: String? = null,
 )

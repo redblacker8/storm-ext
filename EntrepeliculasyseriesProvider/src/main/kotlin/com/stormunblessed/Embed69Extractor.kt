@@ -31,6 +31,11 @@ object Embed69Extractor {
     private val ALTCHA_KEY_LENGTH = Regex(""""keyLength"\s*:\s*(\d+)""")
     private val VOE_SOURCE = Regex(""""source"\s*:\s*"([^"]+)"""")
     private val VOE_DIRECT = Regex(""""direct_access_url"\s*:\s*"([^"]+)"""")
+    private val ANUBIS_CHALLENGE = Regex(
+        """<script[^>]*id="anubis_challenge"[^>]*>(.*?)</script>""",
+        RegexOption.DOT_MATCHES_ALL
+    )
+    private const val MAX_ANUBIS_NONCE = 8_000_000L
 
     suspend fun load(
         url: String,
@@ -38,7 +43,8 @@ object Embed69Extractor {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        loadFromDocument(app.get(url).document, url, subtitleCallback, callback)
+        val html = fetchHtml(url, referer) ?: return
+        loadFromHtml(html, url, subtitleCallback, callback)
     }
 
     suspend fun loadFromDocument(
@@ -47,32 +53,112 @@ object Embed69Extractor {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        var aesKey: ByteArray;
-        doc.select("script")
-            .firstOrNull { it.html().contains("dataLink = [") }?.html()?.let {
-                val POW_CHALLENGE = it.substringAfter("const POW_CHALLENGE = '").substringBefore("';")
-                val POW_DIFFICULTY = it.substringAfter("const POW_DIFFICULTY = ").substringBefore(";").toInt()
-                val POW_SALT = it.substringAfter("const POW_SALT = '").substringBefore("';")
-                aesKey = deriveAesKey(POW_CHALLENGE, POW_DIFFICULTY, POW_SALT)
-                it
-            }?.substringAfter("dataLink = ")
-            ?.substringBefore(";")?.let {
-                AppUtils.tryParseJson<List<ServersByLang>>(it)?.amap { lang ->
-                    val links = lang.sortedEmbeds.amap { decryptAES(it.link!!, aesKey ) }
-                    if (links.isNotEmpty()) {
-                        links.filterNotNull().amap {
-                            loadServer(
-                                lang.videoLanguage,
-                                it,
-                                referer,
-                                subtitleCallback,
-                                callback
-                            )
-                        }
-                    }
+        loadFromHtml(doc.html(), referer, subtitleCallback, callback)
+    }
+
+    private suspend fun loadFromHtml(
+        html: String,
+        referer: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        // The player markup moved the payload/keys inside an IIFE and changed the key
+        // derivation, so parse both schemes instead of relying on fixed offsets.
+        val aesKey = deriveKeyFromScript(html) ?: return
+        val dataLink = DATA_LINK.find(html)?.groupValues?.get(1) ?: return
+        AppUtils.tryParseJson<List<ServersByLang>>(dataLink)?.amap { lang ->
+            val links = lang.sortedEmbeds.mapNotNull { it.link }.amap { decryptAES(it, aesKey) }
+            if (links.isNotEmpty()) {
+                links.filterNotNull().amap {
+                    loadServer(
+                        lang.videoLanguage,
+                        it,
+                        referer,
+                        subtitleCallback,
+                        callback
+                    )
                 }
             }
+        }
     }
+
+    /**
+     * embed69.org is gated by an Anubis proof-of-work wall ("Making sure you're not a bot!").
+     * Solve the challenge (sha256(randomData + nonce) with `difficulty` leading zero nibbles) and
+     * replay the page with the auth cookie the pass-challenge endpoint hands out.
+     */
+    private suspend fun fetchHtml(url: String, referer: String?): String? {
+        val first = app.get(url, referer = referer)
+        val challengeJson = ANUBIS_CHALLENGE.find(first.text)?.groupValues?.get(1)
+            ?: return first.text
+        val page = AppUtils.tryParseJson<AnubisPage>(challengeJson) ?: return first.text
+        val challenge = page.challenge ?: return first.text
+        val id = challenge.id ?: return first.text
+        val randomData = challenge.randomData ?: return first.text
+        val nonce = solveAnubisNonce(randomData, page.rules?.difficulty ?: 4) ?: return null
+        val origin = runCatching { URI(url).let { "${it.scheme}://${it.host}" } }.getOrNull()
+            ?: return null
+        val query = listOf(
+            "id" to id,
+            "response" to sha256Hex(randomData + nonce),
+            "nonce" to nonce,
+            "redir" to url,
+            "elapsedTime" to "1500",
+        ).joinToString("&") { (key, value) ->
+            "$key=${URLEncoder.encode(value, "UTF-8")}"
+        }
+        val pass = app.get(
+            "$origin/.within.website/x/cmd/anubis/api/pass-challenge?$query",
+            referer = url,
+            cookies = first.cookies,
+            allowRedirects = false,
+        )
+        val cookies = first.cookies + pass.cookies
+        if (cookies.isEmpty()) return null
+        return app.get(url, referer = referer, cookies = cookies).text
+    }
+
+    private fun solveAnubisNonce(randomData: String, difficulty: Int): String? {
+        val prefix = "0".repeat(difficulty.coerceIn(1, 16))
+        var nonce = 0L
+        while (nonce < MAX_ANUBIS_NONCE) {
+            if (sha256Hex(randomData + nonce).startsWith(prefix)) return nonce.toString()
+            nonce++
+        }
+        return null
+    }
+
+    private fun sha256Hex(input: String): String =
+        MessageDigest.getInstance("SHA-256").digest(input.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+
+    private val DATA_LINK = Regex("""dataLink\s*=\s*(\[.*?])\s*;""", RegexOption.DOT_MATCHES_ALL)
+    private fun scriptString(script: String, name: String): String? =
+        Regex("""(?:const|let|var)\s+$name\s*=\s*['"]([^'"]*)['"]""")
+            .find(script)?.groupValues?.get(1)
+
+    private fun scriptInt(script: String, name: String): Int? =
+        Regex("""(?:const|let|var)\s+$name\s*=\s*(\d+)""")
+            .find(script)?.groupValues?.get(1)?.toIntOrNull()
+
+    /**
+     * Two key schemes are in the wild:
+     *  - current: `key = sha256(LINK_CHALLENGE + LINK_SALT)`
+     *  - legacy: proof-of-work, find the first nonce whose `sha256(POW_CHALLENGE + nonce)`
+     *    starts with `POW_DIFFICULTY` zeroes, then `key = sha256(POW_CHALLENGE + nonce + POW_SALT)`.
+     */
+    private fun deriveKeyFromScript(script: String): ByteArray? {
+        val challenge = scriptString(script, "LINK_CHALLENGE")
+        val salt = scriptString(script, "LINK_SALT")
+        if (challenge != null && salt != null) return sha256Bytes(challenge + salt)
+        val powChallenge = scriptString(script, "POW_CHALLENGE") ?: return null
+        val powSalt = scriptString(script, "POW_SALT") ?: return null
+        val difficulty = scriptInt(script, "POW_DIFFICULTY") ?: return null
+        return deriveAesKey(powChallenge, difficulty, powSalt)
+    }
+
+    private fun sha256Bytes(input: String): ByteArray =
+        MessageDigest.getInstance("SHA-256").digest(input.toByteArray(Charsets.UTF_8))
 
     private suspend fun loadServer(
         lang: String?,
@@ -295,11 +381,6 @@ object Embed69Extractor {
             return hash.joinToString("") { "%02x".format(it) }
         }
 
-        fun sha256Bytes(input: String): ByteArray {
-            val digest = MessageDigest.getInstance("SHA-256")
-            return digest.digest(input.toByteArray(Charsets.UTF_8))
-        }
-
         while (true) {
             for (i in 0 until batchSize) {
                 val hashHex = sha256Hex(challenge + nonce)
@@ -312,7 +393,12 @@ object Embed69Extractor {
     }
     fun decryptAES(encryptedBase64: String, aesKey: ByteArray): String? {
         return try {
-            val raw = Base64.decode(encryptedBase64, Base64.DEFAULT)
+            // Links are JSON-escaped in the page (`\/`), so keep only base64 characters.
+            val cleaned = encryptedBase64.filter {
+                it.isLetterOrDigit() || it == '+' || it == '/' || it == '=' || it == '-' || it == '_'
+            }
+            val raw = Base64.decode(cleaned, Base64.DEFAULT)
+            if (raw.size <= 16) return null
             val iv = raw.copyOfRange(0, 16)
             val ciphertext = raw.copyOfRange(16, raw.size)
             val keyBytes = aesKey.copyOfRange(0, 32)
@@ -320,7 +406,7 @@ object Embed69Extractor {
             val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
             cipher.init(Cipher.DECRYPT_MODE, secretKey, IvParameterSpec(iv))
             val decrypted = cipher.doFinal(ciphertext)
-            String(decrypted, Charsets.UTF_8)
+            String(decrypted, Charsets.UTF_8).replace("`", "").trim()
         } catch (e: Exception) {
             null
         }
@@ -338,6 +424,22 @@ data class ServersByLang(
     @JsonProperty("video_language") val videoLanguage: String? = null,
     @JsonProperty("sortedEmbeds") val sortedEmbeds: List<Server> = emptyList<Server>(),
     @JsonProperty("downloadEmbeds") val downloadEmbeds: List<Server> = emptyList<Server>(),
+)
+
+/** Minimal shape of the JSON embedded by the Anubis bot wall on embed69.org. */
+data class AnubisPage(
+    @JsonProperty("rules") val rules: AnubisRules? = null,
+    @JsonProperty("challenge") val challenge: AnubisChallenge? = null,
+)
+
+data class AnubisRules(
+    @JsonProperty("algorithm") val algorithm: String? = null,
+    @JsonProperty("difficulty") val difficulty: Int? = null,
+)
+
+data class AnubisChallenge(
+    @JsonProperty("id") val id: String? = null,
+    @JsonProperty("randomData") val randomData: String? = null,
 )
 
 data class LinksRequest(
