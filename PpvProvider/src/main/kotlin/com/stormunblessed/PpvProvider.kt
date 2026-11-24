@@ -6,6 +6,7 @@ import com.lagradost.cloudstream3.utils.AppUtils.toJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import okhttp3.Interceptor
 
 class PpvProvider : MainAPI() {
     override var mainUrl = "https://ppv.st"
@@ -179,7 +180,7 @@ class PpvProvider : MainAPI() {
     }
 
     /**
-     * Direct .m3u8 urls go straight to M3u8Helper; the external player frames are resolved in a
+     * Direct .m3u8 urls go straight to the player; the external player frames are resolved in a
      * WebView (their HLS url is built by obfuscated client code, see resolveEmbedM3u8), and
      * anything unresolved is handed to the generic extractors as a last resort.
      */
@@ -190,7 +191,9 @@ class PpvProvider : MainAPI() {
     ) {
         val embed = feed.url
         if (embed.contains(".m3u8")) {
-            generateLinks(feed.server, feed.lang, embed, "$mainUrl/", callback)
+            // No player page exists for these, and the hosts answer 403 to a `ppv.st` referer, so
+            // the link is emitted without one.
+            generateLinks(feed.server, feed.lang, embed, null, callback)
             return
         }
         val m3u8 = runCatching { resolveEmbedM3u8(embed, "$mainUrl/") }.getOrNull()
@@ -202,28 +205,41 @@ class PpvProvider : MainAPI() {
     }
 
     /**
-     * Emits the resolved master playlist directly. It cannot go through M3u8Helper: the stream
-     * hosts answer 403 unless the request carries a Referer from the player page, while
-     * M3u8Helper fetches the playlist without one (its `referer` argument only decorates the
-     * links it returns) and therefore comes back empty. The player fetches the master itself
-     * with the Referer attached here and expands its variants.
+     * Emits the resolved playlist directly. It cannot go through M3u8Helper: the stream hosts
+     * answer 403 unless the request comes from the player page (a `ppv.st` referer is refused
+     * outright), while M3u8Helper fetches the playlist without that context and therefore comes
+     * back empty. The player fetches the playlist itself with the referer attached here.
+     *
+     * `source` is the extension name rather than the server label because CS3IPlayer only looks up
+     * [getVideoInterceptor] through `getApiFromNameNull(link.source)`; the visible label keeps the
+     * standard "<Idioma> - <Servidor> - <Extensión>" form.
      */
     private suspend fun generateLinks(
         server: String?,
         lang: String?,
         m3u8: String,
-        referer: String,
+        referer: String?,
         callback: (ExtractorLink) -> Unit
     ) {
         callback(
             newExtractorLink(
-                normalizeSourceServer(server),
+                EXTENSION_NAME,
                 standardSourceName(lang, server),
                 m3u8,
                 type = ExtractorLinkType.M3U8
             ) {
-                this.referer = referer
+                referer?.let { this.referer = it }
             }
         )
+    }
+
+    /**
+     * Playlists from these hosts carry a `#EXT-X-PROGRAM-DATE-TIME` that is up to a minute off the
+     * wall clock, which makes the player replay the whole (short) live window in a loop; see
+     * [stripProgramDateTime].
+     */
+    override fun getVideoInterceptor(extractorLink: ExtractorLink): Interceptor? {
+        if (extractorLink.type != ExtractorLinkType.M3U8) return null
+        return hlsPlaylistInterceptor()
     }
 }

@@ -9,6 +9,8 @@ import com.lagradost.cloudstream3.utils.loadExtractor
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import okhttp3.Interceptor
+import okhttp3.ResponseBody.Companion.toResponseBody
 
 /**
  * Extension name this module's link labels must end with (AGENTS.md "Source-name standard").
@@ -49,6 +51,62 @@ fun normalizeSourceServer(server: String?): String {
     if (cleaned.isEmpty()) return "Directo"
     val needsCapital = cleaned.all { it.isLowerCase() || !it.isLetter() }
     return if (needsCapital) cleaned.replaceFirstChar { it.uppercaseChar() } else cleaned
+}
+
+/**
+ * `#EXT-X-PROGRAM-DATE-TIME` line of an HLS playlist, including its line break.
+ */
+private val PROGRAM_DATE_TIME_LINE = Regex("""(?m)^#EXT-X-PROGRAM-DATE-TIME:.*\r?\n?""")
+
+/** First bytes of an HLS playlist; anything else under a `.m3u8` url is passed through. */
+private const val PLAYLIST_MAGIC = "#EXTM3U"
+
+/**
+ * Drops `#EXT-X-PROGRAM-DATE-TIME` from an HLS playlist.
+ *
+ * media3 builds the whole live clock on that tag: `HlsMediaSource` sets `windowStartTimeMs` from
+ * it (only when the playlist has it) and `Player.getCurrentLiveOffset()` is
+ * `now - windowStartTimeMs - position`. The hosts behind this site stamp it up to about a minute
+ * off the real time (measured from -4s to +78s across channels), so the live offset comes out
+ * tens of seconds negative. CloudStream's live helper then computes `ahead = 5s - liveOffset` and
+ * seeks back by more than the current position, the seek clamps to the start of the ~20s window,
+ * and the player replays that same window in a loop. Without the tag the playlist is a plain
+ * sliding window and the live helper falls back to its window-relative math.
+ */
+fun stripProgramDateTime(playlist: String): String {
+    if (!playlist.startsWith(PLAYLIST_MAGIC) || !playlist.contains("#EXT-X-PROGRAM-DATE-TIME")) {
+        return playlist
+    }
+    return playlist.replace(PROGRAM_DATE_TIME_LINE, "")
+}
+
+/**
+ * Player interceptor that rewrites the HLS playlists on their way to ExoPlayer, see
+ * [stripProgramDateTime]. Segments and every other response are returned untouched.
+ */
+fun hlsPlaylistInterceptor(): Interceptor = Interceptor { chain ->
+    val request = chain.request()
+    val response = chain.proceed(request)
+    if (!request.url.toString().contains(".m3u8")) return@Interceptor response
+
+    val body = response.body ?: return@Interceptor response
+
+    // Peek before buffering: some CDN lanes answer a playlist request with a whole TS segment,
+    // and those must not be pulled into memory.
+    val buffered = body.source()
+    runCatching { buffered.request(PLAYLIST_MAGIC.length.toLong()) }
+    val head = runCatching { buffered.buffer.clone().readUtf8(PLAYLIST_MAGIC.length.toLong()) }
+        .getOrNull()
+    if (head != PLAYLIST_MAGIC) return@Interceptor response
+
+    val text = runCatching { body.string() }.getOrNull() ?: return@Interceptor response
+    val rewritten = stripProgramDateTime(text).toResponseBody(body.contentType())
+    response.newBuilder()
+        .body(rewritten)
+        .removeHeader("Transfer-Encoding")
+        .header("Content-Length", rewritten.contentLength().toString())
+        .header("Accept-Ranges", "none")
+        .build()
 }
 
 /**
