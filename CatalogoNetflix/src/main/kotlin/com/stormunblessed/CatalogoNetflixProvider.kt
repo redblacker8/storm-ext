@@ -1,8 +1,10 @@
 package com.stormunblessed
 
+import android.widget.Toast
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.APIHolder.apis
 import com.lagradost.cloudstream3.APIHolder.getApiFromNameNull
+import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.ErrorLoadingException
 import com.lagradost.cloudstream3.Episode
 import com.lagradost.cloudstream3.HomePageList
@@ -33,12 +35,14 @@ import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import com.lagradost.cloudstream3.utils.AppUtils.toJson
 import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.stormunblessed.settings.CatalogoSourceFilter
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.Calendar
 import java.util.Collections
+import java.util.concurrent.atomic.AtomicInteger
 
 data class NetflixLatamData(
     @JsonProperty("id") val id: Int? = null,
@@ -110,7 +114,7 @@ data class NetflixCrossSource(
  * provider's episodes list. If no match is found, the detail shows metadata
  * only (comingSoon) with a search button via QuickSearch.
  */
-class CatalogoNetflixProvider : MainAPI() {
+class CatalogoNetflixProvider(private val filter: CatalogoSourceFilter) : MainAPI() {
     override var name = "Catálogo Netflix"
     override var mainUrl = "https://www.themoviedb.org"
     override var lang = "mx"
@@ -131,8 +135,19 @@ class CatalogoNetflixProvider : MainAPI() {
         return filterName(Regex("""\s*\(?\d{4}\)?\s*$""").replace(name, ""))
     }
 
-    private val validApis
-        get() = apis.filter { it.lang == this.lang && it::class != this::class }
+    // Other installed providers that can supply links. Meta providers (the
+    // other catalogs) are excluded so a catalog never delegates to another
+    // catalog (which would chain searches and duplicate sources), and providers
+    // blocked in the settings panel are skipped.
+    private val validApis: List<MainAPI>
+        get() {
+            val blocked = filter.effectiveBlocked()
+            return apis.filter {
+                it.lang == this.lang &&
+                    it.providerType != ProviderType.MetaProvider &&
+                    it.name !in blocked
+            }
+        }
 
     // Resolving a title searches the other installed providers. CloudStream
     // calls load() for the home page preview (hero) row, so a slow load()
@@ -146,6 +161,7 @@ class CatalogoNetflixProvider : MainAPI() {
     private val providerSearchTimeoutMs = 5_000L
     private val findMatchesDeadlineMs = 6_000L
     private val maxMatchesForFallback = 4
+    private val maxLoadsForFallback = 8
 
     // Short-lived cache for TMDB responses so that reloading the home page
     // (CloudStream refetches every section at once) is instant instead of
@@ -189,13 +205,17 @@ class CatalogoNetflixProvider : MainAPI() {
         return searchYear == null || y == searchYear
     }
 
-    private suspend fun searchProvider(
+    private class CandidateMatch(val api: MainAPI, val searchResponse: SearchResponse)
+
+    // Phase 1: find a matching search result. This is cheap (no detail request),
+    // so it still runs for every allowed provider in parallel.
+    private suspend fun searchMatch(
         api: MainAPI,
         title: String,
         matchName: String,
         searchYear: Int?,
         isTv: Boolean,
-    ): SearchMatch? {
+    ): CandidateMatch? {
         return try {
             withTimeout(providerSearchTimeoutMs) {
                 val searchResult = api.search(title, 1) ?: return@withTimeout null
@@ -211,8 +231,25 @@ class CatalogoNetflixProvider : MainAPI() {
                     comparableName(it.name).equals(matchName, ignoreCase = true)
                 } ?: return@withTimeout null
 
-                val loaded = api.load(matched.url) ?: return@withTimeout null
-                SearchMatch(api.name, loaded)
+                CandidateMatch(api, matched)
+            }
+        } catch (e: TimeoutCancellationException) {
+            null
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            logError(e)
+            null
+        }
+    }
+
+    // Phase 2: only the first maxLoadsForFallback candidates pay this; the rest
+    // are dropped before making a detail request.
+    private suspend fun loadMatch(candidate: CandidateMatch): SearchMatch? {
+        return try {
+            withTimeout(providerSearchTimeoutMs) {
+                val loaded = candidate.api.load(candidate.searchResponse.url) ?: return@withTimeout null
+                SearchMatch(candidate.api.name, loaded)
             }
         } catch (e: TimeoutCancellationException) {
             null
@@ -230,7 +267,9 @@ class CatalogoNetflixProvider : MainAPI() {
         searchYear: Int?,
         isTv: Boolean,
     ): List<SearchMatch> {
-        val key = "$isTv|$matchName|$searchYear"
+        // The blocked set is part of the key: a change in the settings panel must
+        // not resurrect a result cached with the previous selection.
+        val key = "$isTv|$matchName|$searchYear|${filter.signature()}"
         val now = System.currentTimeMillis()
         searchCache[key]?.let { if (now - it.timestamp < searchCacheMs) return it.matches }
 
@@ -239,9 +278,15 @@ class CatalogoNetflixProvider : MainAPI() {
         // bounds the whole search (e.g. when the title matches nothing and
         // every provider has to answer first).
         var complete = true
+        // Searches run for every allowed provider; only the first
+        // maxLoadsForFallback matches pay the expensive load(). The counter is
+        // local so concurrent loads of different titles do not share it.
+        val loads = AtomicInteger(0)
         val matches = withTimeoutOrNull(findMatchesDeadlineMs) {
             validApis.amap { api ->
-                searchProvider(api, title, matchName, searchYear, isTv)
+                val candidate = searchMatch(api, title, matchName, searchYear, isTv) ?: return@amap null
+                if (loads.incrementAndGet() > maxLoadsForFallback) return@amap null
+                loadMatch(candidate)
             }.filterNotNull()
         } ?: run {
             complete = false
@@ -521,6 +566,7 @@ class CatalogoNetflixProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         var linksFound = false
+        var blockedSources = 0
         val wrappedCallback: (ExtractorLink) -> Unit = { link ->
             linksFound = true
             callback(link)
@@ -528,6 +574,12 @@ class CatalogoNetflixProvider : MainAPI() {
         tryParseJson<NetflixCrossMetaData>(data)?.let { metaData ->
             if (!metaData.isSuccess) return false
             metaData.sources?.amap { source ->
+                // Sources blocked in the settings panel are skipped here too, so
+                // a detail page opened before the change stops using them.
+                if (!filter.isAllowed(source.apiName)) {
+                    blockedSources++
+                    return@amap
+                }
                 getApiFromNameNull(source.apiName)?.let {
                     try {
                         it.loadLinks(source.dataUrl, isCasting, subtitleCallback, wrappedCallback)
@@ -536,9 +588,14 @@ class CatalogoNetflixProvider : MainAPI() {
                     }
                 }
             }
+            if (!linksFound) notifyAllSourcesBlocked(blockedSources)
             return linksFound
         }
         tryParseJson<NetflixCrossSource>(data)?.let { source ->
+            if (!filter.isAllowed(source.apiName)) {
+                notifyAllSourcesBlocked(1)
+                return false
+            }
             getApiFromNameNull(source.apiName)?.let {
                 try {
                     it.loadLinks(source.dataUrl, isCasting, subtitleCallback, wrappedCallback)
@@ -549,6 +606,21 @@ class CatalogoNetflixProvider : MainAPI() {
             return linksFound
         }
         return false
+    }
+
+    /**
+     * The app shows a generic "No links found" when nothing plays, so explain the
+     * otherwise invisible cause: every source for this title is blocked in the
+     * settings panel.
+     */
+    private fun notifyAllSourcesBlocked(blockedSources: Int) {
+        if (blockedSources <= 0) return
+        runCatching {
+            CommonActivity.showToast(
+                "$name: todas las fuentes de este título están bloqueadas en los ajustes.",
+                Toast.LENGTH_LONG,
+            )
+        }
     }
 
     private suspend fun tmdbGet(path: String, params: Map<String, String> = emptyMap()): String {
