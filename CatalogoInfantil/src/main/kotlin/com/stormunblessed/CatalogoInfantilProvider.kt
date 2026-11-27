@@ -35,6 +35,8 @@ import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.Calendar
@@ -128,6 +130,10 @@ class CatalogoInfantilProvider : MainAPI() {
     )
     override val hasMainPage = true
 
+    // A hung TMDB request would otherwise keep the home page on the loading
+    // spinner for the app's default 120s.
+    override val getMainPageTimeoutMs: Long? = 20_000L
+
     private fun filterName(name: String): String {
         return Regex("""[^a-zA-Z0-9-]""").replace(name, "")
     }
@@ -157,7 +163,7 @@ class CatalogoInfantilProvider : MainAPI() {
     // Short-lived cache for TMDB responses so that reloading the home page
     // (CloudStream refetches every section at once) is instant instead of
     // hammering TMDB with many parallel requests.
-    private val tmdbCacheMs = 15L * 60 * 1000
+    private val tmdbCacheMs = 60L * 60 * 1000
     private data class TmdbCacheEntry(val timestamp: Long, val body: String)
     private val tmdbCache = Collections.synchronizedMap(HashMap<String, TmdbCacheEntry>())
 
@@ -272,7 +278,7 @@ class CatalogoInfantilProvider : MainAPI() {
     // `certification` filter avoids titles without a registered MX certification
     // and, by not including "A", excludes non-kids content that does have it
     // (e.g. La Momia, Friends, Jesus 1979).
-    private val kidsCertifications = listOf("AA")
+    private val kidsCertification = "AA"
     private val certificationCountry = "MX"
 
     // Kids genres for series: Family, Kids and Animation.
@@ -288,65 +294,72 @@ class CatalogoInfantilProvider : MainAPI() {
     // Minimum votes for movies: discards AA titles with 0-1 votes that are junk
     // or unknown regional releases (e.g. "Maruchan con Huevo").
     // Real kids content (Toy Story, Inside Out) accumulates thousands of votes.
-    private val movieMinVotes = 10
+    private val movieMinVotes = 25
 
-    // Per-genre section configuration: the sort order is diversified so that
-    // each row shows different content instead of repeating the same popularity.
-    private data class GenreSection(val id: Int, val sortBy: String, val minVotes: Boolean)
+    // Genre rows. The row genre is combined with the kids genres so that
+    // non-kids titles of that genre are excluded.
+    private data class GenreSection(val id: Int, val sortBy: String, val minMovieVotes: Int)
 
-    private val genreSections = mapOf(
-        "animacion" to GenreSection(16, "popularity.desc", false),
-        "familia" to GenreSection(10751, "vote_average.desc", true),
-        "ninos" to GenreSection(10762, "primary_release_date.desc", false),
-        "aventura" to GenreSection(12, "popularity.desc", false),
-        "fantasia" to GenreSection(14, "vote_average.desc", true),
-        "comedia" to GenreSection(35, "primary_release_date.desc", false),
-    )
+    // Animation is the genre with by far the most kids content, so it gets the
+    // only genre row that also has a series counterpart. Adventure is the most
+    // distinct non-animation genre; TMDB's series query for it (genre AND the
+    // kids genres) returns nothing, so it is a movie-only row.
+    private val animacionSection = GenreSection(16, "popularity.desc", movieMinVotes)
+    private val aventuraSection = GenreSection(12, "popularity.desc", movieMinVotes)
 
-    // Deduplication across main page sections: titles already shown are not
-    // repeated in the following rows. It resets after a time window.
-    private val minSectionResults = 12
-    private val seenWindowMs = 30L * 60 * 1000
-    private val seenMainPageKeys = Collections.synchronizedSet(mutableSetOf<String>())
-    private var seenWindowStart = System.currentTimeMillis()
+    // A row shows at most this many cards: the rest of the TMDB page is dropped
+    // because the UI never scrolls that far and every card is an image to load.
+    private val maxRowItems = 24
 
     private fun mainPageKey(result: TmdbCatalogoResult): String =
         "${result.isTv}-${result.id ?: result.displayTitle}"
 
-    private fun dedupeMainPage(raw: List<TmdbCatalogoResult>): List<TmdbCatalogoResult> {
-        val now = System.currentTimeMillis()
-        if (now - seenWindowStart > seenWindowMs) {
-            seenMainPageKeys.clear()
-            seenWindowStart = now
+    // Within-row dedupe only. CloudStream fetches every section in parallel, so a
+    // cross-row "already seen" set would be filled by whichever section finished
+    // first (not by the first row of the list), which emptied rows or replaced
+    // their content with repeats nondeterministically.
+    private fun rowResults(raw: List<TmdbCatalogoResult>): List<TmdbCatalogoResult> =
+        raw.distinctBy { mainPageKey(it) }.take(maxRowItems)
+
+    private fun <T> interleave(first: List<T>, second: List<T>): List<T> {
+        val out = ArrayList<T>(first.size + second.size)
+        for (i in 0 until maxOf(first.size, second.size)) {
+            first.getOrNull(i)?.let { out.add(it) }
+            second.getOrNull(i)?.let { out.add(it) }
         }
-        val fresh = mutableListOf<TmdbCatalogoResult>()
-        val repeats = mutableListOf<TmdbCatalogoResult>()
-        for (result in raw) {
-            if (mainPageKey(result) in seenMainPageKeys) {
-                repeats.add(result)
-            } else {
-                seenMainPageKeys.add(mainPageKey(result))
-                fresh.add(result)
-            }
+        return out
+    }
+
+    private suspend fun <T> safeRow(block: suspend () -> List<T>): List<T> {
+        return try {
+            block()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            logError(e)
+            emptyList()
         }
-        // never leave a row almost empty: gaps are filled with repeats
-        val fill = (minSectionResults - fresh.size).coerceAtLeast(0)
-        return fresh + repeats.take(fill)
+    }
+
+    // Movie and series discovery are joined into one row, but both requests are
+    // fired in parallel so the row costs one round trip instead of two. The
+    // cards alternate movie/series; a plain concatenation would put 20 movies
+    // first and push the series off the first screen.
+    private suspend fun <T> bothRows(
+        movies: suspend () -> List<T>,
+        series: suspend () -> List<T>,
+    ): List<T> = supervisorScope {
+        val movieRow = async { safeRow(movies) }
+        val seriesRow = async { safeRow(series) }
+        interleave(movieRow.await(), seriesRow.await())
     }
 
     override val mainPage = listOf(
-        mainPage("recomendados", "Recomendados", false),
-        mainPage("peliculas", "Películas Populares", false),
-        mainPage("series", "Series Populares", false),
         mainPage("tendencias", "Tendencias", false),
-        mainPage("estrenos", "Estrenos", false),
-        mainPage("mejor", "Mejor Calificadas", false),
+        mainPage("peliculas", "Películas", false),
+        mainPage("series", "Series", false),
         mainPage("animacion", "Animación", false),
-        mainPage("familia", "Familia", false),
-        mainPage("ninos", "Niños", false),
         mainPage("aventura", "Aventura", false),
-        mainPage("fantasia", "Fantasía", false),
-        mainPage("comedia", "Comedia", false),
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
@@ -354,40 +367,44 @@ class CatalogoInfantilProvider : MainAPI() {
         val horizontal = false
 
         val raw = when (request.data) {
-            "recomendados" ->
-                discoverMovies(page, "popularity.desc") +
-                        discoverSeries(page, "popularity.desc")
-
-            "peliculas" -> discoverMovies(page, "vote_average.desc", minVotes = true)
-            "series" -> discoverSeries(page, "vote_average.desc", minVotes = true)
-
             "tendencias" ->
                 // Fresh releases don't have an MX AA certification registered on
                 // TMDB yet, so the certification filter is skipped for this row:
-                // applying it to the current-year window returns nothing.
-                discoverMovies(page, "popularity.desc", recent = true, applyCert = false) +
-                        discoverSeries(page, "popularity.desc", recent = true, applyCert = false)
-
-            "estrenos" ->
-                discoverMovies(page, "primary_release_date.desc") +
-                        discoverSeries(page, "first_air_date.desc")
-
-            "mejor" ->
-                discoverMovies(page, "popularity.desc") +
-                        discoverSeries(page, "popularity.desc")
-
-            "animacion", "familia", "ninos", "aventura", "fantasia", "comedia" -> {
-                val config = genreSections[request.data] ?: return newHomePageResponse(
-                    HomePageList(request.name, emptyList(), false),
-                    hasNext = false
+                // applying it to the current-year window returns nothing. The
+                // vote filter keeps junk (0-vote regional releases) out without
+                // requiring the high vote count of the "best rated" rows.
+                // Kids series take longer to accumulate votes, so their window is
+                // wider (2 years): a current-year window fills the row with
+                // 0-vote placeholders.
+                bothRows(
+                    {
+                        discoverMovies(
+                            page, "popularity.desc",
+                            recentYears = 0, applyCert = false, minVoteCount = 50,
+                        )
+                    },
+                    {
+                        discoverSeries(
+                            page, "popularity.desc",
+                            recentYears = 2, applyCert = false, minVoteCount = 10,
+                        )
+                    },
                 )
-                genreMovies(page, config) + genreSeries(page, config)
-            }
+
+            "peliculas" -> discoverMovies(page, "vote_average.desc", minVoteCount = 150)
+            "series" -> discoverSeries(page, "vote_average.desc", minVoteCount = 100)
+
+            "animacion" -> bothRows(
+                { genreMovies(page, animacionSection) },
+                { genreSeries(page, animacionSection) },
+            )
+
+            "aventura" -> genreMovies(page, aventuraSection)
 
             else -> emptyList()
         }
 
-        val results = dedupeMainPage(raw).mapNotNull { it.toCatalogoSearchResponse(horizontal) }
+        val results = rowResults(raw).mapNotNull { it.toCatalogoSearchResponse(horizontal) }
 
         return newHomePageResponse(
             HomePageList(request.name, results, horizontal),
@@ -577,95 +594,86 @@ class CatalogoInfantilProvider : MainAPI() {
     private suspend fun discoverMovies(
         page: Int,
         sortBy: String,
-        recent: Boolean = false,
-        minVotes: Boolean = false,
+        recentYears: Int? = null,
+        minVoteCount: Int? = movieMinVotes,
         applyCert: Boolean = true,
     ): List<TmdbCatalogoResult> {
-        return kidsCertifications.flatMap { cert ->
-            parseJson<TmdbCatalogoPageResult>(
-                tmdbGet(
-                    "/discover/movie",
-                    buildMap {
-                        put("page", "$page")
-                        put("sort_by", sortBy)
-                        put("with_genres", movieKidsGenres)
-                        if (applyCert) {
-                            put("certification_country", certificationCountry)
-                            put("certification", cert)
-                        }
-                        if (recent) put("primary_release_date.gte", "${currentYear()}-01-01")
-                        put("vote_count.gte", if (minVotes) "150" else "$movieMinVotes")
+        return parseJson<TmdbCatalogoPageResult>(
+            tmdbGet(
+                "/discover/movie",
+                buildMap {
+                    put("page", "$page")
+                    put("sort_by", sortBy)
+                    put("with_genres", movieKidsGenres)
+                    if (applyCert) {
+                        put("certification_country", certificationCountry)
+                        put("certification", kidsCertification)
                     }
-                )
-            ).results ?: emptyList()
-        }
+                    recentYears?.let { put("primary_release_date.gte", yearFloor(it)) }
+                    minVoteCount?.let { put("vote_count.gte", "$it") }
+                }
+            )
+        ).results ?: emptyList()
     }
 
     private suspend fun discoverSeries(
         page: Int,
         sortBy: String,
-        recent: Boolean = false,
-        minVotes: Boolean = false,
+        recentYears: Int? = null,
+        minVoteCount: Int? = null,
         applyCert: Boolean = true,
     ): List<TmdbCatalogoResult> {
-        return kidsCertifications.flatMap { cert ->
-            parseJson<TmdbCatalogoPageResult>(
-                tmdbGet(
-                    "/discover/tv",
-                    buildMap {
-                        put("page", "$page")
-                        put("sort_by", sortBy)
-                        put("with_genres", tvKidsGenres)
-                        if (applyCert) {
-                            put("certification_country", certificationCountry)
-                            put("certification", cert)
-                        }
-                        if (recent) put("first_air_date.gte", "${currentYear()}-01-01")
-                        if (minVotes) put("vote_count.gte", "100")
+        return parseJson<TmdbCatalogoPageResult>(
+            tmdbGet(
+                "/discover/tv",
+                buildMap {
+                    put("page", "$page")
+                    put("sort_by", sortBy)
+                    put("with_genres", tvKidsGenres)
+                    if (applyCert) {
+                        put("certification_country", certificationCountry)
+                        put("certification", kidsCertification)
                     }
-                )
-            ).results ?: emptyList()
-        }
+                    recentYears?.let { put("first_air_date.gte", yearFloor(it)) }
+                    minVoteCount?.let { put("vote_count.gte", "$it") }
+                }
+            )
+        ).results ?: emptyList()
     }
 
     private suspend fun genreMovies(page: Int, config: GenreSection): List<TmdbCatalogoResult> {
-        return kidsCertifications.flatMap { cert ->
-            parseJson<TmdbCatalogoPageResult>(
-                tmdbGet(
-                    "/discover/movie",
-                    buildMap {
-                        put("page", "$page")
-                        put("sort_by", config.sortBy)
-                        put("with_genres", "${config.id}")
-                        put("certification_country", certificationCountry)
-                        put("certification", cert)
-                        put("vote_count.gte", if (config.minVotes) "150" else "$movieMinVotes")
-                    }
-                )
-            ).results ?: emptyList()
-        }
+        return parseJson<TmdbCatalogoPageResult>(
+            tmdbGet(
+                "/discover/movie",
+                buildMap {
+                    put("page", "$page")
+                    put("sort_by", config.sortBy)
+                    put("with_genres", "${config.id}")
+                    put("certification_country", certificationCountry)
+                    put("certification", kidsCertification)
+                    put("vote_count.gte", "${config.minMovieVotes}")
+                }
+            )
+        ).results ?: emptyList()
     }
 
     private suspend fun genreSeries(page: Int, config: GenreSection): List<TmdbCatalogoResult> {
-        return kidsCertifications.flatMap { cert ->
-            parseJson<TmdbCatalogoPageResult>(
-                tmdbGet(
-                    "/discover/tv",
-                    buildMap {
-                        put("page", "$page")
-                        put("sort_by", config.sortBy)
-                        // TMDB's certification filter does not apply to TV, so the
-                        // section requires the row genre PLUS the kids genres (AND)
-                        // to exclude unsuitable sitcoms (e.g. Friends, Two and a
-                        // Half Men).
-                        put("with_genres", "${config.id},10751,10762,16")
-                        put("certification_country", certificationCountry)
-                        put("certification", cert)
-                        if (config.minVotes) put("vote_count.gte", "100")
-                    }
-                )
-            ).results ?: emptyList()
-        }
+        return parseJson<TmdbCatalogoPageResult>(
+            tmdbGet(
+                "/discover/tv",
+                buildMap {
+                    put("page", "$page")
+                    put("sort_by", config.sortBy)
+                    // TMDB's certification filter does not apply to TV, so the
+                    // section requires the row genre PLUS the kids genres (AND)
+                    // to exclude unsuitable sitcoms (e.g. Friends, Two and a
+                    // Half Men).
+                    put("with_genres", "${config.id},$tvKidsGenres")
+                    put("certification_country", certificationCountry)
+                    put("certification", kidsCertification)
+                }
+            )
+        ).results ?: emptyList()
     }
 
     private fun TmdbCatalogoResult.toCatalogoSearchResponse(
@@ -710,5 +718,11 @@ class CatalogoInfantilProvider : MainAPI() {
 
     private fun currentYear(): Int {
         return Calendar.getInstance().get(Calendar.YEAR)
+    }
+
+    // Start of the window used by the "recent" rows: 0 = January 1st of the
+    // current year, 2 = two years back.
+    private fun yearFloor(yearsBack: Int): String {
+        return "${currentYear() - yearsBack}-01-01"
     }
 }

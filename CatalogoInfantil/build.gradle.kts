@@ -1,11 +1,11 @@
 // use an integer for version numbers
-version = 5
+version = 6
 
 cloudstream {
     language = "mx"
     // All of these properties are optional, you can safely remove them
 
-    description = "Catálogo infantil y familiar clasificación AA: recomendaciones, estrenos, tendencias y géneros. No aloja fuentes: busca contenido con la lupa del detalle."
+    description = "Catálogo infantil y familiar clasificación AA: tendencias, películas, series, animación y aventura. No aloja fuentes: busca contenido con la lupa del detalle."
     authors = listOf("redblacker8")
 
     /**
