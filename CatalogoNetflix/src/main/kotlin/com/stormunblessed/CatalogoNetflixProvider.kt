@@ -37,11 +37,17 @@ import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.stormunblessed.settings.CatalogoSourceFilter
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
+import java.io.File
+import java.security.MessageDigest
+import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Collections
+import java.util.Locale
 import java.util.concurrent.atomic.AtomicInteger
 
 data class NetflixLatamData(
@@ -86,6 +92,7 @@ data class TmdbNetflixDetails(
     @JsonProperty("first_air_date") val firstAirDate: String? = null,
     @JsonProperty("runtime") val runtime: Int? = null,
     @JsonProperty("genres") val genres: List<TmdbNetflixGenre>? = null,
+    @JsonProperty("seasons") val seasons: List<NetflixSeason>? = null,
 ) {
     val displayTitle get() = title ?: name ?: originalTitle ?: originalName ?: ""
     val year get() = (releaseDate ?: firstAirDate)?.take(4)?.toIntOrNull()
@@ -107,14 +114,69 @@ data class NetflixCrossSource(
 )
 
 /**
- * Netflix LATAM: meta provider for discovering Netflix content available in
- * Mexico/LATAM in Spanish. On load, it searches other installed providers
- * (same language) for the title and, if found, delegates playback to them.
- * Movies get a Play button via CrossMetaData; TV series get the matched
- * provider's episodes list. If no match is found, the detail shows metadata
- * only (comingSoon) with a search button via QuickSearch.
+ * Playback target stored in the detail dataUrl (movies) or in each episode data
+ * (series).
+ *
+ * load() only resolves TMDB metadata and never searches the other providers:
+ * CloudStream calls load() for the home page preview (hero) row, so an eager
+ * search delayed the first paint of the whole home page by several seconds. The
+ * provider search runs lazily in loadLinks(), when the user presses play.
  */
-class CatalogoNetflixProvider(private val filter: CatalogoSourceFilter) : MainAPI() {
+data class NetflixDeferredData(
+    @JsonProperty("title") val title: String,
+    @JsonProperty("year") val year: Int? = null,
+    @JsonProperty("isTv") val isTv: Boolean = false,
+    @JsonProperty("season") val season: Int? = null,
+    @JsonProperty("episode") val episode: Int? = null,
+    // Absolute position in the show (0-based): used to find the provider episode
+    // when it lists the whole show as a single season (e.g. anime).
+    @JsonProperty("index") val index: Int? = null,
+)
+
+/** TMDB season list (/tv/{id}), used to build the episode list. */
+data class NetflixSeason(
+    @JsonProperty("season_number") val seasonNumber: Int? = null,
+    @JsonProperty("episode_count") val episodeCount: Int? = null,
+)
+
+data class NetflixSeasonDetails(
+    @JsonProperty("episodes") val episodes: List<NetflixTvEpisode>? = null,
+)
+
+data class NetflixTvEpisode(
+    @JsonProperty("episode_number") val episodeNumber: Int? = null,
+    @JsonProperty("name") val name: String? = null,
+    @JsonProperty("overview") val overview: String? = null,
+    @JsonProperty("air_date") val airDate: String? = null,
+    @JsonProperty("still_path") val stillPath: String? = null,
+    @JsonProperty("runtime") val runtime: Int? = null,
+)
+
+/** Netflix Top 10 row: the title and the poster from the Netflix CDN. */
+data class NetflixTop10Row(
+    @JsonProperty("title") val title: String = "",
+    @JsonProperty("poster") val poster: String? = null,
+)
+
+data class NetflixTop10Payload(
+    @JsonProperty("rows") val rows: List<NetflixTop10Row>? = null,
+)
+
+/**
+ * Netflix LATAM: meta provider for discovering Netflix content available in
+ * Mexico/LATAM in Spanish.
+ *
+ * load() only resolves TMDB metadata (and the episode list of a series): the
+ * installed providers are searched lazily in loadLinks(), when the user presses
+ * play. That keeps the home page fast, because the app calls load() for the
+ * hero row of the home page. Playback itself is delegated to the matched
+ * provider, so the sources keep working as before.
+ */
+class CatalogoNetflixProvider(
+    private val filter: CatalogoSourceFilter,
+    // Directory of the persisted section cache (null disables it).
+    private val cacheDir: File? = null,
+) : MainAPI() {
     override var name = "Catálogo Netflix"
     override var mainUrl = "https://www.themoviedb.org"
     override var lang = "mx"
@@ -124,6 +186,10 @@ class CatalogoNetflixProvider(private val filter: CatalogoSourceFilter) : MainAP
         TvType.TvSeries,
     )
     override val hasMainPage = true
+
+    // A hung TMDB request would otherwise keep the home page on the loading
+    // spinner for the app's default 120s.
+    override val getMainPageTimeoutMs: Long? = 20_000L
 
     private fun filterName(name: String): String {
         return Regex("""[^a-zA-Z0-9-]""").replace(name, "")
@@ -171,6 +237,49 @@ class CatalogoNetflixProvider(private val filter: CatalogoSourceFilter) : MainAP
     private data class TmdbCacheEntry(val timestamp: Long, val body: String)
 
     private val tmdbCache = Collections.synchronizedMap(HashMap<String, TmdbCacheEntry>())
+
+    // Section bodies are also kept on disk: on Android TV the app is killed
+    // between sessions, so an in-memory cache alone made every cold start
+    // refetch all sections (~20 requests) before the home page could paint.
+    private val tmdbDiskCacheMs = 6L * 60 * 60 * 1000
+
+    private fun cacheFile(key: String): File? {
+        val dir = cacheDir ?: return null
+        val digest = MessageDigest.getInstance("MD5").digest(key.toByteArray())
+        val name = digest.joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        return File(dir, name)
+    }
+
+    private fun readCacheFile(key: String, ttlMs: Long): String? {
+        return try {
+            val file = cacheFile(key) ?: return null
+            if (!file.exists()) return null
+            if (System.currentTimeMillis() - file.lastModified() > ttlMs) {
+                file.delete()
+                return null
+            }
+            val text = file.readText()
+            val newline = text.indexOf('\n')
+            if (newline <= 0) return null
+            // The key is stored in the file, so a hash collision can never serve
+            // another section's body.
+            if (text.substring(0, newline) != key) return null
+            text.substring(newline + 1)
+        } catch (e: Exception) {
+            logError(e)
+            null
+        }
+    }
+
+    private fun writeCacheFile(key: String, body: String) {
+        try {
+            val file = cacheFile(key) ?: return
+            file.parentFile?.mkdirs()
+            file.writeText("$key\n$body")
+        } catch (e: Exception) {
+            logError(e)
+        }
+    }
 
     // Short-lived cache for the provider-search outcome per title, so the search
     // is only paid for the first time a title is opened (a second open of the
@@ -321,50 +430,69 @@ class CatalogoNetflixProvider(private val filter: CatalogoSourceFilter) : MainAP
     private val minVotes = 50
 
     // Per-genre section configuration
-    private data class GenreSection(val id: Int, val sortBy: String, val minVotes: Boolean)
-
-    private val genreSections = mapOf(
-        "accion" to GenreSection(28, "popularity.desc", false),
-        "drama" to GenreSection(18, "vote_average.desc", true),
-        "comedia" to GenreSection(35, "popularity.desc", false),
-        "thriller" to GenreSection(53, "vote_average.desc", true),
-        "misterio" to GenreSection(9648, "vote_average.desc", true),
-        "scifi" to GenreSection(878, "popularity.desc", false),
-        "fantasia" to GenreSection(14, "popularity.desc", false),
-        "horror" to GenreSection(27, "popularity.desc", false),
-        "documental" to GenreSection(99, "popularity.desc", false),
-        "animacion" to GenreSection(16, "popularity.desc", false),
-        "aventura" to GenreSection(12, "popularity.desc", false),
-        "romance" to GenreSection(10749, "vote_average.desc", true),
+    // TMDB uses a different genre id space for series: "Acción" is 28 for
+    // movies but 10759 (Action & Adventure) for TV, and some movie genres
+    // (Terror, Fantasía) have no TV equivalent. A null [tvId] means the row is
+    // movies only, so no series request is made at all.
+    private data class GenreSection(
+        val id: Int,
+        val sortBy: String,
+        val minVotes: Boolean,
+        val tvId: Int? = null,
     )
 
-    // Deduplication across main page sections
-    private val minSectionResults = 12
-    private val seenWindowMs = 30L * 60 * 1000
-    private val seenMainPageKeys = Collections.synchronizedSet(mutableSetOf<String>())
-    private var seenWindowStart = System.currentTimeMillis()
+    private val genreSections = mapOf(
+        "accion" to GenreSection(28, "popularity.desc", false, tvId = 10759),
+        "comedia" to GenreSection(35, "popularity.desc", false, tvId = 35),
+        "scifi" to GenreSection(878, "popularity.desc", false, tvId = 10765),
+        "fantasia" to GenreSection(14, "popularity.desc", false),
+        "horror" to GenreSection(27, "popularity.desc", false),
+        "animacion" to GenreSection(16, "popularity.desc", false, tvId = 16),
+    )
 
-    private fun mainPageKey(result: TmdbNetflixResult): String =
-        "${result.isTv}-${result.id ?: result.displayTitle}"
+    // A row shows at most this many cards: the rest of the TMDB page is dropped
+    // because the UI never scrolls that far and every card is an image to load.
+    private val maxRowItems = 24
 
-    private fun dedupeMainPage(raw: List<TmdbNetflixResult>): List<TmdbNetflixResult> {
-        val now = System.currentTimeMillis()
-        if (now - seenWindowStart > seenWindowMs) {
-            seenMainPageKeys.clear()
-            seenWindowStart = now
+    // Within-row dedupe only. CloudStream fetches every section in parallel, so a
+    // cross-row "already seen" set was filled by whichever section finished
+    // first (not by the first row of the list), which emptied rows or replaced
+    // their content with repeats nondeterministically between reloads. The same
+    // title in two different rows is fine.
+    private fun rowResults(raw: List<TmdbNetflixResult>): List<TmdbNetflixResult> =
+        raw.distinctBy { "${it.isTv}-${it.id ?: it.displayTitle}" }.take(maxRowItems)
+
+    private fun <T> interleave(first: List<T>, second: List<T>): List<T> {
+        val out = ArrayList<T>(first.size + second.size)
+        for (i in 0 until maxOf(first.size, second.size)) {
+            first.getOrNull(i)?.let { out.add(it) }
+            second.getOrNull(i)?.let { out.add(it) }
         }
-        val fresh = mutableListOf<TmdbNetflixResult>()
-        val repeats = mutableListOf<TmdbNetflixResult>()
-        for (result in raw) {
-            if (mainPageKey(result) in seenMainPageKeys) {
-                repeats.add(result)
-            } else {
-                seenMainPageKeys.add(mainPageKey(result))
-                fresh.add(result)
-            }
+        return out
+    }
+
+    private suspend fun <T> safeRow(block: suspend () -> List<T>): List<T> {
+        return try {
+            block()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            logError(e)
+            emptyList()
         }
-        val fill = (minSectionResults - fresh.size).coerceAtLeast(0)
-        return fresh + repeats.take(fill)
+    }
+
+    // Movie and series discovery are joined into one row, but both requests are
+    // fired in parallel so the row costs one round trip instead of two. The cards
+    // alternate movie/series; a plain concatenation would put 20 movies first and
+    // push the series off the first screen.
+    private suspend fun <T> bothRows(
+        movies: suspend () -> List<T>,
+        series: suspend () -> List<T>,
+    ): List<T> = supervisorScope {
+        val movieRow = async { safeRow(movies) }
+        val seriesRow = async { safeRow(series) }
+        interleave(movieRow.await(), seriesRow.await())
     }
 
     override val mainPage = listOf(
@@ -377,50 +505,59 @@ class CatalogoNetflixProvider(private val filter: CatalogoSourceFilter) : MainAP
         mainPage("kdrama", "K-Drama", false),
         mainPage("anime", "Anime", false),
         mainPage("accion", "Acción", false),
-        mainPage("drama", "Drama", false),
         mainPage("comedia", "Comedia", false),
-        mainPage("thriller", "Thriller", false),
-        mainPage("misterio", "Misterio", false),
         mainPage("scifi", "Ciencia Ficción", false),
         mainPage("fantasia", "Fantasía", false),
         mainPage("horror", "Horror", false),
-        mainPage("documental", "Documentales", false),
         mainPage("animacion", "Animación", false),
-        mainPage("aventura", "Aventura", false),
-        mainPage("romance", "Romance", false),
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val horizontal = false
 
+        // Top 10 rows are a fixed list: they are built from the Netflix page
+        // (cached for hours) and have no pagination.
+        val top10Url = when (request.data) {
+            "top10global" -> "https://www.netflix.com/tudum/top10"
+            "top10mexico" -> "https://www.netflix.com/tudum/top10/mexico"
+            else -> null
+        }
+        if (top10Url != null) {
+            // The Tudum page only exposes landscape thumbnails (389x219), so the
+            // row is rendered with horizontal cards instead of portrait posters.
+            return newHomePageResponse(
+                HomePageList(request.name, top10Items(top10Url), isHorizontalImages = true),
+                hasNext = false
+            )
+        }
+
         val raw = when (request.data) {
-            "top10global" -> top10Section("https://www.netflix.com/tudum/top10")
+            "popular" -> bothRows(
+                { discoverMovies(page, "popularity.desc") },
+                { discoverSeries(page, "popularity.desc") },
+            )
 
-            "top10mexico" -> top10Section("https://www.netflix.com/tudum/top10/mexico")
+            "top" -> bothRows(
+                { discoverMovies(page, "vote_average.desc", minVotes = true) },
+                { discoverSeries(page, "vote_average.desc", minVotes = true) },
+            )
 
-            "popular" ->
-                discoverMovies(page, "popularity.desc") +
-                        discoverSeries(page, "popularity.desc")
+            "nuevos" -> bothRows(
+                { discoverMovies(page, "primary_release_date.desc", recent = true) },
+                { discoverSeries(page, "first_air_date.desc", recent = true) },
+            )
 
-            "top" ->
-                discoverMovies(page, "vote_average.desc", minVotes = true) +
-                        discoverSeries(page, "vote_average.desc", minVotes = true)
+            "originales" -> discoverSeries(page, "popularity.desc", originals = true)
 
-            "nuevos" ->
-                discoverMovies(page, "primary_release_date.desc", recent = true) +
-                        discoverSeries(page, "first_air_date.desc", recent = true)
-
-            "originales" ->
-                discoverSeries(page, "popularity.desc", originals = true)
-
-            "accion", "drama", "comedia", "thriller", "misterio",
-            "scifi", "fantasia", "horror", "documental", "animacion",
-            "aventura", "romance" -> {
+            "accion", "comedia", "scifi", "fantasia", "horror", "animacion" -> {
                 val config = genreSections[request.data] ?: return newHomePageResponse(
-                    HomePageList(request.name, emptyList(), true),
+                    HomePageList(request.name, emptyList(), horizontal),
                     hasNext = false
                 )
-                genreMovies(page, config) + genreSeries(page, config)
+                bothRows(
+                    { genreMovies(page, config) },
+                    { genreSeries(page, config) },
+                )
             }
 
             "kdrama" -> discoverKoreanSeries(page, "popularity.desc")
@@ -430,16 +567,11 @@ class CatalogoNetflixProvider(private val filter: CatalogoSourceFilter) : MainAP
             else -> emptyList()
         }
 
-        val isTop10 = request.data == "top10global" || request.data == "top10mexico"
-        val results = if (isTop10) {
-            raw.mapNotNull { it.toNetflixSearchResponse(horizontal) }
-        } else {
-            dedupeMainPage(raw).mapNotNull { it.toNetflixSearchResponse(horizontal) }
-        }
+        val results = rowResults(raw).mapNotNull { it.toNetflixSearchResponse(horizontal) }
 
         return newHomePageResponse(
             HomePageList(request.name, results, horizontal),
-            hasNext = !isTop10 && results.isNotEmpty()
+            hasNext = results.isNotEmpty()
         )
     }
 
@@ -449,114 +581,157 @@ class CatalogoNetflixProvider(private val filter: CatalogoSourceFilter) : MainAP
 
     override suspend fun load(url: String): LoadResponse? {
         val data = tryParseJson<NetflixLatamData>(url) ?: return null
-        val id = data.id ?: return null
 
-        val details = if (data.isTv) {
+        // Top 10 rows only carry the title (their poster comes from the Netflix
+        // CDN), so the TMDB id is resolved here instead of on the home page.
+        var id = data.id
+        var isTv = data.isTv
+        if (id == null) {
+            val resolved = resolveTmdbId(data.title ?: return null) ?: return null
+            id = resolved.id ?: return null
+            isTv = resolved.isTv
+        }
+
+        val details = if (isTv) {
             parseJson<TmdbNetflixDetails>(tmdbGet("/tv/$id"))
         } else {
             parseJson<TmdbNetflixDetails>(tmdbGet("/movie/$id"))
         }
 
         val title = details.displayTitle.takeIf { it.isNotBlank() } ?: return null
-        val type = if (data.isTv) TvType.TvSeries else TvType.Movie
+        val type = if (isTv) TvType.TvSeries else TvType.Movie
         val year = data.year ?: details.year
         val poster = getImageUrl(details.posterPath)
         val backdrop = getImageUrl(details.backdropPath, "w780")
         val score = Score.from10(details.voteAverage)
         val tags = details.genres?.mapNotNull { it.name }
 
-        // Search other providers for this title. All providers are hit in parallel
-        // under a short global deadline so that load() stays fast even when many
-        // providers are installed — CloudStream calls load() for the home page
-        // preview row, so a slow load() stalls the main page.
-        val matchName = filterName(title)
-        val searchYear = year
-        val matches = findMatches(title, matchName, searchYear, data.isTv)
-
-        if (matches.isEmpty()) {
-            return if (data.isTv) {
-                newTvSeriesLoadResponse(title, url, type, episodes = emptyList()) {
-                    this.posterUrl = poster
-                    this.backgroundPosterUrl = backdrop
-                    this.year = year
-                    this.plot = details.overview
-                    this.score = score
-                    this.tags = tags
-                }
-            } else {
-                newMovieLoadResponse(title, url, type, dataUrl = "") {
-                    this.posterUrl = poster
-                    this.backgroundPosterUrl = backdrop
-                    this.year = year
-                    this.plot = details.overview
-                    this.score = score
-                    this.tags = tags
-                    this.duration = details.runtime?.let { it * 60 }
-                }
+        // No provider search here: load() is also called by the app for the home
+        // page hero row (3 titles per home load), and searching every installed
+        // provider delayed the first paint of the whole main page by several
+        // seconds. The search runs in loadLinks(), when the user presses play.
+        return if (isTv) {
+            val episodes = buildTmdbEpisodes(id, title, year, details.seasons)
+            newTvSeriesLoadResponse(title, url, type, episodes = episodes) {
+                this.posterUrl = poster
+                this.backgroundPosterUrl = backdrop
+                this.year = year
+                this.plot = details.overview
+                this.score = score
+                this.tags = tags
+            }
+        } else {
+            val deferred = NetflixDeferredData(title = title, year = year, isTv = false).toJson()
+            newMovieLoadResponse(title, url, type, dataUrl = deferred) {
+                this.posterUrl = poster
+                this.backgroundPosterUrl = backdrop
+                this.year = year
+                this.plot = details.overview
+                this.score = score
+                this.tags = tags
+                this.duration = details.runtime?.let { it * 60 }
             }
         }
+    }
 
-        val first = matches.first()
+    /**
+     * Resolves the TMDB entry of a title without id (the Top 10 rows, built from
+     * the Netflix page so no TMDB search is needed per row).
+     */
+    private suspend fun resolveTmdbId(title: String): TmdbNetflixResult? {
+        val results = try {
+            parseJson<TmdbNetflixPageResult>(
+                tmdbGet("/search/multi", buildMap { put("query", title) })
+            ).results.orEmpty()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            logError(e)
+            emptyList()
+        }
+        val candidates = results.filter { it.mediaType != "person" && it.id != null }
+        // The catalog row carries the title as published by the source (e.g. the
+        // original English one), while TMDB answers with the local title, so the
+        // original title is compared too.
+        val wanted = comparableName(title)
+        fun matches(candidate: TmdbNetflixResult): Boolean =
+            comparableName(candidate.displayTitle) == wanted ||
+                candidate.originalTitle?.let { comparableName(it) == wanted } == true ||
+                candidate.originalName?.let { comparableName(it) == wanted } == true
 
-        return when (val loaded = first.loaded) {
-            is MovieLoadResponse -> {
-                val movieMatches = matches.filter { it.loaded is MovieLoadResponse }
-                val crossData = NetflixCrossMetaData(
-                    true,
-                    movieMatches.map { NetflixCrossSource(it.providerName, (it.loaded as MovieLoadResponse).dataUrl) }
-                ).toJson()
-                newMovieLoadResponse(title, url, type, dataUrl = crossData) {
-                    this.posterUrl = poster
-                    this.backgroundPosterUrl = backdrop
-                    this.year = year
-                    this.plot = details.overview
-                    this.score = score
-                    this.tags = tags
-                    this.duration = details.runtime?.let { it * 60 }
-                }
+        return candidates.firstOrNull { matches(it) } ?: candidates.firstOrNull()
+    }
+
+    /**
+     * Episode list from TMDB: one request per season, fired in parallel and
+     * cached by [tmdbGet]. This keeps the series detail fast without waiting for
+     * a provider (the previous list came from the matched provider, which
+     * required a full provider search inside load()).
+     *
+     * Every episode stores a deferred target, so the provider episode is looked
+     * up only when the user plays it.
+     */
+    private suspend fun buildTmdbEpisodes(
+        id: Int,
+        title: String,
+        year: Int?,
+        seasons: List<NetflixSeason>?,
+    ): List<Episode> {
+        val validSeasons = seasons.orEmpty()
+            .filter { (it.seasonNumber ?: 0) > 0 && (it.episodeCount ?: 0) > 0 }
+            .sortedBy { it.seasonNumber }
+
+        val fetched = validSeasons.amap { season ->
+            val seasonNumber = season.seasonNumber ?: return@amap emptyList<Pair<Int, List<NetflixTvEpisode>>>()
+            val episodes = try {
+                parseJson<NetflixSeasonDetails>(
+                    tmdbGet("/tv/$id/season/$seasonNumber")
+                ).episodes.orEmpty()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                logError(e)
+                emptyList()
             }
+            listOf(seasonNumber to episodes.sortedBy { it.episodeNumber ?: 0 })
+        }.flatten()
 
-            is TvSeriesLoadResponse -> {
-                // Collect every provider that matched as a series so that when the
-                // user plays an episode, loadLinks can fall back across all of
-                // them instead of only the first match (a provider may lack
-                // working links for an episode while another has them).
-                val seriesMatches = matches.filter { it.loaded is TvSeriesLoadResponse }
-                val wrappedEpisodes = loaded.episodes.map { ep ->
-                    val sources = mutableListOf(NetflixCrossSource(first.providerName, ep.data))
-                    seriesMatches.forEach { other ->
-                        if (other.providerName == first.providerName) return@forEach
-                        val otherLoaded = other.loaded as TvSeriesLoadResponse
-                        otherLoaded.episodes.firstOrNull {
-                            it.season == ep.season && it.episode == ep.episode
-                        }?.let { sources.add(NetflixCrossSource(other.providerName, it.data)) }
-                    }
-                    val wrapped = NetflixCrossMetaData(true, sources).toJson()
-                    @Suppress("DEPRECATION_ERROR")
+        val out = mutableListOf<Episode>()
+        var index = 0
+        for ((seasonNumber, episodes) in fetched) {
+            for (raw in episodes) {
+                val episodeNumber = raw.episodeNumber ?: continue
+                @Suppress("DEPRECATION_ERROR")
+                out.add(
                     Episode(
-                        data = wrapped,
-                        name = ep.name,
-                        season = ep.season,
-                        episode = ep.episode,
-                        posterUrl = ep.posterUrl,
-                        score = ep.score,
-                        description = ep.description,
-                        date = ep.date,
-                        runTime = ep.runTime,
+                        data = NetflixDeferredData(
+                            title = title,
+                            year = year,
+                            isTv = true,
+                            season = seasonNumber,
+                            episode = episodeNumber,
+                            index = index,
+                        ).toJson(),
+                        name = raw.name?.takeIf { it.isNotBlank() } ?: "Episodio $episodeNumber",
+                        season = seasonNumber,
+                        episode = episodeNumber,
+                        posterUrl = getImageUrl(raw.stillPath, "w300"),
+                        description = raw.overview?.takeIf { it.isNotBlank() },
+                        date = isoDateToMillis(raw.airDate),
+                        runTime = raw.runtime?.let { it * 60 },
                     )
-                }
-                newTvSeriesLoadResponse(title, url, type, episodes = wrappedEpisodes) {
-                    this.posterUrl = poster
-                    this.backgroundPosterUrl = backdrop
-                    this.year = year
-                    this.plot = details.overview
-                    this.score = score
-                    this.tags = tags
-                }
+                )
+                index++
             }
-
-            else -> null
         }
+        return out
+    }
+
+    private fun isoDateToMillis(date: String?): Long? {
+        if (date.isNullOrBlank()) return null
+        return runCatching {
+            SimpleDateFormat("yyyy-MM-dd", Locale.US).parse(date)?.time
+        }.getOrNull()
     }
 
     override suspend fun loadLinks(
@@ -566,20 +741,16 @@ class CatalogoNetflixProvider(private val filter: CatalogoSourceFilter) : MainAP
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         var linksFound = false
-        var blockedSources = 0
         val wrappedCallback: (ExtractorLink) -> Unit = { link ->
             linksFound = true
             callback(link)
         }
-        tryParseJson<NetflixCrossMetaData>(data)?.let { metaData ->
-            if (!metaData.isSuccess) return false
-            metaData.sources?.amap { source ->
-                // Sources blocked in the settings panel are skipped here too, so
-                // a detail page opened before the change stops using them.
-                if (!filter.isAllowed(source.apiName)) {
-                    blockedSources++
-                    return@amap
-                }
+
+        suspend fun play(sources: List<NetflixCrossSource>): Boolean {
+            // Sources blocked in the settings panel are skipped here too, so a
+            // detail page opened before the change stops using them.
+            val allowed = sources.filter { filter.isAllowed(it.apiName) }
+            allowed.amap { source ->
                 getApiFromNameNull(source.apiName)?.let {
                     try {
                         it.loadLinks(source.dataUrl, isCasting, subtitleCallback, wrappedCallback)
@@ -588,38 +759,81 @@ class CatalogoNetflixProvider(private val filter: CatalogoSourceFilter) : MainAP
                     }
                 }
             }
-            if (!linksFound) notifyAllSourcesBlocked(blockedSources)
+            if (!linksFound) notifyNoSources(sources.size - allowed.size, sources.size)
             return linksFound
         }
+
+        // Normal path: the detail only stored the title, so the providers are
+        // searched now (cached per title for a few minutes).
+        tryParseJson<NetflixDeferredData>(data)?.let { deferred ->
+            return play(resolveSources(deferred))
+        }
+        // Compatibility with payloads built by older versions.
+        tryParseJson<NetflixCrossMetaData>(data)?.let { metaData ->
+            if (!metaData.isSuccess) return false
+            return play(metaData.sources.orEmpty())
+        }
         tryParseJson<NetflixCrossSource>(data)?.let { source ->
-            if (!filter.isAllowed(source.apiName)) {
-                notifyAllSourcesBlocked(1)
-                return false
-            }
-            getApiFromNameNull(source.apiName)?.let {
-                try {
-                    it.loadLinks(source.dataUrl, isCasting, subtitleCallback, wrappedCallback)
-                } catch (e: Exception) {
-                    logError(e)
-                }
-            }
-            return linksFound
+            return play(listOf(source))
         }
         return false
     }
 
     /**
-     * The app shows a generic "No links found" when nothing plays, so explain the
-     * otherwise invisible cause: every source for this title is blocked in the
-     * settings panel.
+     * Searches the installed providers for a deferred title and returns the
+     * per-provider playback payloads. This is the expensive step that used to
+     * run inside load(); now it only runs when the user presses play.
      */
-    private fun notifyAllSourcesBlocked(blockedSources: Int) {
-        if (blockedSources <= 0) return
+    private suspend fun resolveSources(deferred: NetflixDeferredData): List<NetflixCrossSource> {
+        val matches = findMatches(
+            deferred.title,
+            filterName(deferred.title),
+            deferred.year,
+            deferred.isTv,
+        )
+
+        if (!deferred.isTv) {
+            return matches.mapNotNull { match ->
+                val movie = match.loaded as? MovieLoadResponse ?: return@mapNotNull null
+                NetflixCrossSource(match.providerName, movie.dataUrl)
+            }
+        }
+
+        val season = deferred.season
+        val episode = deferred.episode
+        val absolute = deferred.index
+        return matches.mapNotNull { match ->
+            val series = match.loaded as? TvSeriesLoadResponse ?: return@mapNotNull null
+            // Exact season/episode first; providers that list the whole show as
+            // one season (anime, telenovelas) are matched by absolute position.
+            val exact = if (season != null && episode != null) {
+                series.episodes.firstOrNull { it.season == season && it.episode == episode }
+            } else {
+                null
+            }
+            val found = exact ?: absolute?.let { position ->
+                series.episodes
+                    .sortedWith(compareBy({ it.season ?: 0 }, { it.episode ?: 0 }))
+                    .getOrNull(position)
+            }
+            found?.let { NetflixCrossSource(match.providerName, it.data) }
+        }
+    }
+
+    /**
+     * The app shows a generic "No links found" when nothing plays, so explain the
+     * otherwise invisible cause: no provider has the title, or every source for
+     * it is blocked in the settings panel.
+     */
+    private fun notifyNoSources(blockedSources: Int, totalSources: Int) {
+        val message = when {
+            totalSources <= 0 -> "$name: no se encontraron fuentes en tus proveedores."
+            blockedSources >= totalSources ->
+                "$name: todas las fuentes de este título están bloqueadas en los ajustes."
+            else -> return
+        }
         runCatching {
-            CommonActivity.showToast(
-                "$name: todas las fuentes de este título están bloqueadas en los ajustes.",
-                Toast.LENGTH_LONG,
-            )
+            CommonActivity.showToast(message, Toast.LENGTH_LONG)
         }
     }
 
@@ -627,6 +841,10 @@ class CatalogoNetflixProvider(private val filter: CatalogoSourceFilter) : MainAP
         val key = "$path${params.toSortedMap()}"
         val now = System.currentTimeMillis()
         tmdbCache[key]?.let { if (now - it.timestamp < tmdbCacheMs) return it.body }
+        readCacheFile(key, tmdbDiskCacheMs)?.let { body ->
+            tmdbCache[key] = TmdbCacheEntry(now, body)
+            return body
+        }
 
         val body = app.get(
             url = "$apiBase$path",
@@ -637,50 +855,95 @@ class CatalogoNetflixProvider(private val filter: CatalogoSourceFilter) : MainAP
             },
         ).text
         tmdbCache[key] = TmdbCacheEntry(now, body)
+        // Only page 1 is persisted: that is what the home page shows, and it
+        // keeps the cache to a few dozen small files.
+        val page = params["page"]
+        if (page == null || page == "1") writeCacheFile(key, body)
         return body
     }
 
-    private suspend fun top10Section(url: String): List<TmdbNetflixResult> {
-        return fetchTop10Titles(url).mapNotNull { title -> searchTop10Title(title) }
+    // ------------------------------------------------------------------
+    // Top 10 (netflix.com/tudum)
+    // ------------------------------------------------------------------
+
+    // The Tudum page is ~2 MB of HTML. Building a Jsoup DOM out of it was the
+    // most expensive part of the home page on weak hardware, so the rows are
+    // extracted with a regex over the raw text instead.
+    private val top10RowPattern =
+        Regex("""data-uia="top10-table-row-title"([\s\S]{0,2000}?)</td>""")
+    private val top10ImagePattern = Regex("""<img[^>]*?src="([^"]+)"""")
+    private val top10TitlePattern = Regex("""<button[^>]*>([^<]+)</button>""")
+
+    // The list only changes once a week; a longer cache keeps the two heavy page
+    // downloads off the home page.
+    private val top10CacheMs = 12L * 60 * 60 * 1000
+    private data class Top10CacheEntry(val timestamp: Long, val rows: List<NetflixTop10Row>)
+    private val top10Cache = Collections.synchronizedMap(HashMap<String, Top10CacheEntry>())
+
+    private suspend fun top10Items(url: String): List<SearchResponse> {
+        return top10Rows(url).mapNotNull { row ->
+            val title = row.title.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            // No TMDB id here: that would be one search per row. The item carries
+            // only the title and the Netflix poster; load() resolves the id when
+            // the row is opened.
+            val data = NetflixLatamData(id = null, isTv = false, title = title).toJson()
+            newMovieSearchResponse(title, data, TvType.Movie, fix = false) {
+                this.posterUrl = row.poster
+            }
+        }
     }
 
-    private suspend fun fetchTop10Titles(url: String): List<String> {
+    private suspend fun top10Rows(url: String): List<NetflixTop10Row> {
+        val key = "top10|$url"
+        val now = System.currentTimeMillis()
+        top10Cache[key]?.let { if (now - it.timestamp < top10CacheMs) return it.rows }
+
+        readCacheFile(key, top10CacheMs)?.let { body ->
+            val rows = runCatching {
+                parseJson<NetflixTop10Payload>(body).rows.orEmpty()
+            }.getOrDefault(emptyList())
+            if (rows.isNotEmpty()) {
+                top10Cache[key] = Top10CacheEntry(now, rows)
+                return rows
+            }
+        }
+
+        val rows = fetchTop10Rows(url)
+        if (rows.isNotEmpty()) {
+            top10Cache[key] = Top10CacheEntry(now, rows)
+            writeCacheFile(key, NetflixTop10Payload(rows).toJson())
+        }
+        return rows
+    }
+
+    private suspend fun fetchTop10Rows(url: String): List<NetflixTop10Row> {
         return try {
-            val doc = app.get(
+            val html = app.get(
                 url,
                 headers = mapOf("User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"),
                 referer = "https://www.netflix.com/",
-            ).document
-            doc.select("[data-uia=top10-table-row-title] button").mapNotNull {
-                it.text().trim().takeIf { t -> t.isNotBlank() }
-            }
+            ).text
+            top10RowPattern.findAll(html).take(10).mapNotNull { match ->
+                val block = match.groupValues[1]
+                val title = top10TitlePattern.find(block)?.groupValues?.get(1)
+                    ?.let { unescapeHtml(it) }
+                    ?.trim()
+                    ?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                NetflixTop10Row(title, top10ImagePattern.find(block)?.groupValues?.get(1))
+            }.toList()
         } catch (e: Exception) {
             logError(e)
             emptyList()
         }
     }
 
-    private suspend fun searchTop10Title(title: String): TmdbNetflixResult? {
-        val movies = parseJson<TmdbNetflixPageResult>(
-            tmdbGet(
-                "/search/movie",
-                buildMap {
-                    put("query", title)
-                }
-            )
-        ).results.orEmpty()
-        movies.firstOrNull()?.let { return it }
-
-        val series = parseJson<TmdbNetflixPageResult>(
-            tmdbGet(
-                "/search/tv",
-                buildMap {
-                    put("query", title)
-                }
-            )
-        ).results.orEmpty()
-        return series.firstOrNull()
-    }
+    private fun unescapeHtml(text: String): String = text
+        .replace("&amp;", "&")
+        .replace("&#x27;", "'")
+        .replace("&#39;", "'")
+        .replace("&quot;", "\"")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
 
     private suspend fun discoverMovies(
         page: Int,
@@ -783,13 +1046,16 @@ class CatalogoNetflixProvider(private val filter: CatalogoSourceFilter) : MainAP
     }
 
     private suspend fun genreSeries(page: Int, config: GenreSection): List<TmdbNetflixResult> {
+        // Rows without a TV equivalent are movies only: one request less and no
+        // empty series query.
+        val genreId = config.tvId ?: return emptyList()
         return parseJson<TmdbNetflixPageResult>(
             tmdbGet(
                 "/discover/tv",
                 buildMap {
                     put("page", "$page")
                     put("sort_by", config.sortBy)
-                    put("with_genres", "${config.id}")
+                    put("with_genres", "$genreId")
                     put("with_watch_providers", netflixProviderId)
                     put("watch_region", watchRegion)
                     put("vote_count.gte", if (config.minVotes) "100" else "20")
@@ -828,7 +1094,7 @@ class CatalogoNetflixProvider(private val filter: CatalogoSourceFilter) : MainAP
         }
     }
 
-    private fun getImageUrl(link: String?, size: String = "w500"): String? {
+    private fun getImageUrl(link: String?, size: String = "w342"): String? {
         link ?: return null
         return if (link.startsWith("/")) "https://image.tmdb.org/t/p/$size$link" else link
     }

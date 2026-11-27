@@ -7,6 +7,7 @@ import com.lagradost.cloudstream3.plugins.Plugin
 import com.stormunblessed.settings.CatalogoSourceFilter
 import com.stormunblessed.settings.CatalogoSourceFilterFragment
 import com.stormunblessed.settings.findAppCompatActivity
+import java.io.File
 
 @CloudstreamPlugin
 class CatalogoInfantilProviderPlugin : Plugin() {
@@ -18,7 +19,13 @@ class CatalogoInfantilProviderPlugin : Plugin() {
             Context.MODE_PRIVATE,
         )
         val filter = CatalogoSourceFilter(prefs, CatalogoSourceFilter.KEY_INFANTIL)
-        val provider = CatalogoInfantilProvider(filter)
+        // Section responses are cached on disk: on Android TV the app is
+        // killed between sessions, so the home page would otherwise refetch
+        // every section from scratch on each cold start.
+        val provider = CatalogoInfantilProvider(
+            filter,
+            File(context.cacheDir, "catalogo_infantil"),
+        )
 
         // All providers should be added in this manner. Please don't edit the providers list directly.
         registerMainAPI(provider)
